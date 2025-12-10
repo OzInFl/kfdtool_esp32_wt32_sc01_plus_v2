@@ -3,9 +3,12 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <SD.h>
+#include <vector>
+
 #include <ArduinoJson.h>
 
-static const char* CONTAINER_FILE = "/containers.json";
+static const char* CONTAINERS_PATH = "/containers.json";
 
 ContainerModel& ContainerModel::instance() {
     static ContainerModel inst;
@@ -13,121 +16,78 @@ ContainerModel& ContainerModel::instance() {
 }
 
 ContainerModel::ContainerModel()
-: _activeIndex(-1)
+    : activeIndex_(-1),
+      storageReady_(false)
 {
-    // Try to load from SPIFFS; if it fails, seed defaults and persist them
-    if (!load()) {
-        Serial.println("[ContainerModel] No valid SPIFFS containers.json, seeding defaults...");
-        seedDefaults();
-        save();
-    } else {
-        Serial.printf("[ContainerModel] Loaded %u containers from SPIFFS\n",
-                      (unsigned)_containers.size());
-    }
+    load();
 }
 
 bool ContainerModel::ensureStorage() {
-    if (_storageInit) return _storageOK;
+    if (storageReady_) return true;
 
-    _storageInit = true;
-
+    // Prefer SPIFFS
     if (!SPIFFS.begin(true)) {
         Serial.println("[ContainerModel] SPIFFS mount failed");
-        _storageOK = false;
-    } else {
-        Serial.println("[ContainerModel] SPIFFS mounted");
-        _storageOK = true;
-    }
-
-    return _storageOK;
-}
-
-void ContainerModel::seedDefaults() {
-    _containers.clear();
-
-    {
-        KeyContainer kc;
-        kc.id      = 1;
-        kc.label   = "BSO - Patrol AES256";
-        kc.agency  = "Broward SO";
-        kc.algo    = "AES256";
-        kc.band    = "700/800";
-        kc.hasKeys = true;
-        kc.locked  = false;
-
-        // Example keys (placeholder hex)
-        kc.keys.push_back({ 1, "PATROL ENC 1", "AES256",
-                            "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF",
-                            true });
-
-        kc.keys.push_back({ 2, "PATROL ENC 2", "AES256",
-                            "FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100",
-                            false });
-
-        _containers.push_back(kc);
-    }
-
-    {
-        KeyContainer kc;
-        kc.id      = 2;
-        kc.label   = "Plantation FD - OPS AES256";
-        kc.agency  = "Plantation FD";
-        kc.algo    = "AES256";
-        kc.band    = "700/800";
-        kc.hasKeys = true;
-        kc.locked  = false;
-
-        kc.keys.push_back({ 1, "FD OPS 1", "AES256",
-                            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                            true });
-
-        _containers.push_back(kc);
-    }
-
-    {
-        KeyContainer kc;
-        kc.id      = 3;
-        kc.label   = "MGPD - Secure DES-OFB";
-        kc.agency  = "Miami Gardens PD";
-        kc.algo    = "DES-OFB";
-        kc.band    = "UHF";
-        kc.hasKeys = true;
-        kc.locked  = false;
-
-        kc.keys.push_back({ 1, "SECURE 1", "DES-OFB",
-                            "0123456789ABCDEF",
-                            true });
-
-        _containers.push_back(kc);
-    }
-
-    {
-        KeyContainer kc;
-        kc.id      = 4;
-        kc.label   = "Test / Training";
-        kc.agency  = "Lab";
-        kc.algo    = "AES256";
-        kc.band    = "Multi-band";
-        kc.hasKeys = false;
-        kc.locked  = false;
-        // start with no keys
-        _containers.push_back(kc);
-    }
-
-    _activeIndex = -1;
-}
-
-bool ContainerModel::load() {
-    if (!ensureStorage()) return false;
-
-    if (!SPIFFS.exists(CONTAINER_FILE)) {
-        Serial.println("[ContainerModel] containers.json not found");
+        // You could also attempt SD here if you want:
+        // if (!SD.begin()) { ... }
         return false;
     }
 
-    File f = SPIFFS.open(CONTAINER_FILE, "r");
+    storageReady_ = true;
+    return true;
+}
+
+void ContainerModel::initDefaults() {
+    containers_.clear();
+
+    // Example seed containers
+    KeyContainer c1;
+    c1.id      = 1;
+    c1.label   = "BSO Patrol";
+    c1.agency  = "Broward SO";
+    c1.algo    = "AES256";
+    c1.band    = "700/800";
+    c1.hasKeys = false;
+    c1.locked  = false;
+
+    KeyContainer c2;
+    c2.id      = 2;
+    c2.label   = "Plantation FD";
+    c2.agency  = "Plantation FD";
+    c2.algo    = "AES256";
+    c2.band    = "700/800";
+    c2.hasKeys = false;
+    c2.locked  = false;
+
+    containers_.push_back(c1);
+    containers_.push_back(c2);
+
+    activeIndex_ = 0;
+}
+
+void ContainerModel::normalizeFlags() {
+    for (auto& c : containers_) {
+        c.hasKeys = !c.keys.empty();
+    }
+}
+
+bool ContainerModel::load() {
+    if (!ensureStorage()) {
+        initDefaults();
+        return false;
+    }
+
+    if (!SPIFFS.exists(CONTAINERS_PATH)) {
+        Serial.println("[ContainerModel] containers.json not found, seeding defaults");
+        initDefaults();
+        save();
+        return true;
+    }
+
+    File f = SPIFFS.open(CONTAINERS_PATH, "r");
     if (!f) {
         Serial.println("[ContainerModel] Failed to open containers.json");
+        initDefaults();
         return false;
     }
 
@@ -137,59 +97,48 @@ bool ContainerModel::load() {
 
     if (err) {
         Serial.printf("[ContainerModel] JSON parse error: %s\n", err.c_str());
+        initDefaults();
         return false;
     }
 
-    if (!doc.is<JsonArray>()) {
-        Serial.println("[ContainerModel] containers.json is not an array");
-        return false;
-    }
+    containers_.clear();
 
-    JsonArray arr = doc.as<JsonArray>();
-
-    std::vector<KeyContainer> tmp;
-    tmp.reserve(arr.size());
-
-    for (JsonObject obj : arr) {
+    JsonArray arr = doc["containers"].as<JsonArray>();
+    for (JsonVariant v : arr) {
         KeyContainer kc;
-        kc.id      = obj["id"]      | 0;
-        kc.label   = obj["label"]   | "";
-        kc.agency  = obj["agency"]  | "";
-        kc.algo    = obj["algo"]    | "";
-        kc.band    = obj["band"]    | "";
-        kc.hasKeys = obj["hasKeys"] | false;
-        kc.locked  = obj["locked"]  | false;
-
-        if (kc.label.empty()) continue; // basic sanity
+        kc.id      = v["id"]      | 0;
+        kc.label   = v["label"]   | "";
+        kc.agency  = v["agency"]  | "";
+        kc.algo    = v["algo"]    | "AES256";
+        kc.band    = v["band"]    | "";
+        kc.locked  = v["locked"]  | false;
+        kc.hasKeys = false;
 
         kc.keys.clear();
-        if (obj.containsKey("keys") && obj["keys"].is<JsonArray>()) {
-            JsonArray karr = obj["keys"].as<JsonArray>();
-            for (JsonObject ko : karr) {
-                KeyEntry ke;
-                ke.slot     = ko["slot"]     | 0;
-                ke.label    = ko["label"]    | "";
-                ke.algo     = ko["algo"]     | kc.algo;
-                ke.keyHex   = ko["keyHex"]   | "";
-                ke.selected = ko["selected"] | false;
-
-                if (!ke.label.empty() && !ke.keyHex.empty()) {
-                    kc.keys.push_back(ke);
-                }
-            }
+        JsonArray keys = v["keys"].as<JsonArray>();
+        for (JsonVariant kv : keys) {
+            KeyEntry ke;
+            ke.slot     = kv["slot"]     | 0;
+            ke.label    = kv["label"]    | "";
+            ke.algo     = kv["algo"]     | "AES256";
+            ke.keyHex   = kv["keyHex"]   | "";
+            ke.selected = kv["selected"] | false;
+            kc.keys.push_back(ke);
         }
 
         kc.hasKeys = !kc.keys.empty();
-        tmp.push_back(kc);
+        containers_.push_back(kc);
     }
 
-    if (tmp.empty()) {
-        Serial.println("[ContainerModel] containers.json had no valid entries");
-        return false;
+    activeIndex_ = doc["activeIndex"] | -1;
+    if (activeIndex_ < 0 || activeIndex_ >= (int)containers_.size()) {
+        activeIndex_ = containers_.empty() ? -1 : 0;
     }
 
-    _containers.swap(tmp);
-    _activeIndex = -1;
+    normalizeFlags();
+    Serial.printf("[ContainerModel] Loaded %u containers, active=%d\n",
+                  (unsigned)containers_.size(), activeIndex_);
+
     return true;
 }
 
@@ -197,79 +146,123 @@ bool ContainerModel::save() {
     if (!ensureStorage()) return false;
 
     DynamicJsonDocument doc(8192);
-    JsonArray arr = doc.to<JsonArray>();
 
-    for (const auto& kc : _containers) {
-        JsonObject obj = arr.createNestedObject();
-        obj["id"]      = kc.id;
-        obj["label"]   = kc.label;
-        obj["agency"]  = kc.agency;
-        obj["algo"]    = kc.algo;
-        obj["band"]    = kc.band;
-        obj["hasKeys"] = kc.hasKeys;
-        obj["locked"]  = kc.locked;
+    JsonArray arr = doc.createNestedArray("containers");
+    for (const auto& kc : containers_) {
+        JsonObject o = arr.createNestedObject();
+        o["id"]      = kc.id;
+        o["label"]   = kc.label;
+        o["agency"]  = kc.agency;
+        o["algo"]    = kc.algo;
+        o["band"]    = kc.band;
+        o["locked"]  = kc.locked;
 
-        JsonArray karr = obj.createNestedArray("keys");
+        JsonArray keys = o.createNestedArray("keys");
         for (const auto& ke : kc.keys) {
-            JsonObject ko = karr.createNestedObject();
-            ko["slot"]     = ke.slot;
-            ko["label"]    = ke.label;
-            ko["algo"]     = ke.algo;
-            ko["keyHex"]   = ke.keyHex;
-            ko["selected"] = ke.selected;
+            JsonObject kv = keys.createNestedObject();
+            kv["slot"]     = ke.slot;
+            kv["label"]    = ke.label;
+            kv["algo"]     = ke.algo;
+            kv["keyHex"]   = ke.keyHex;
+            kv["selected"] = ke.selected;
         }
     }
 
-    File f = SPIFFS.open(CONTAINER_FILE, "w");
+    doc["activeIndex"] = activeIndex_;
+
+    File f = SPIFFS.open(CONTAINERS_PATH, "w");
     if (!f) {
         Serial.println("[ContainerModel] Failed to open containers.json for write");
         return false;
     }
 
-    if (serializeJsonPretty(doc, f) == 0) {
-        Serial.println("[ContainerModel] Failed to write JSON");
+    if (serializeJson(doc, f) == 0) {
+        Serial.println("[ContainerModel] Failed to serialize JSON");
         f.close();
         return false;
     }
 
     f.close();
-    Serial.printf("[ContainerModel] Saved %u containers to %s\n",
-                  (unsigned)_containers.size(), CONTAINER_FILE);
+    Serial.println("[ContainerModel] Saved containers.json");
     return true;
 }
 
-void ContainerModel::resetToFactory() {
-    seedDefaults();
-    save();
-}
-
 size_t ContainerModel::getCount() const {
-    return _containers.size();
+    return containers_.size();
 }
 
-const KeyContainer& ContainerModel::get(size_t idx) const {
-    return _containers.at(idx);
-}
-
-KeyContainer& ContainerModel::getMutable(size_t idx) {
-    return _containers.at(idx);
-}
-
-void ContainerModel::setActiveIndex(int idx) {
-    if (idx < 0 || static_cast<size_t>(idx) >= _containers.size()) {
-        _activeIndex = -1;
-    } else {
-        _activeIndex = idx;
+const KeyContainer& ContainerModel::get(size_t index) const {
+    if (index >= containers_.size()) {
+        static KeyContainer dummy;
+        return dummy;
     }
+    return containers_[index];
 }
 
-int ContainerModel::getActiveIndex() const {
-    return _activeIndex;
+KeyContainer& ContainerModel::getMutable(size_t index) {
+    if (index >= containers_.size()) {
+        static KeyContainer dummy;
+        return dummy;
+    }
+    return containers_[index];
 }
 
 const KeyContainer* ContainerModel::getActive() const {
-    if (_activeIndex < 0 || static_cast<size_t>(_activeIndex) >= _containers.size()) {
-        return nullptr;
+    if (activeIndex_ < 0 || activeIndex_ >= (int)containers_.size()) return nullptr;
+    return &containers_[activeIndex_];
+}
+
+int ContainerModel::getActiveIndex() const {
+    return activeIndex_;
+}
+
+void ContainerModel::setActiveIndex(int idx) {
+    if (idx < 0 || idx >= (int)containers_.size()) {
+        activeIndex_ = -1;
+    } else {
+        activeIndex_ = idx;
     }
-    return &_containers[_activeIndex];
+    save();
+}
+
+int ContainerModel::addContainer(const std::string& label,
+                                 const std::string& agency,
+                                 const std::string& band,
+                                 const std::string& algo)
+{
+    if (!ensureStorage()) return -1;
+
+    KeyContainer kc;
+    kc.id      = static_cast<uint8_t>(containers_.size() + 1);
+    kc.label   = label;
+    kc.agency  = agency;
+    kc.band    = band;
+    kc.algo    = algo;
+    kc.hasKeys = false;
+    kc.locked  = false;
+    kc.keys.clear();
+
+    containers_.push_back(kc);
+
+    if (activeIndex_ < 0) {
+        activeIndex_ = (int)containers_.size() - 1;
+    }
+
+    save();
+    return (int)containers_.size() - 1;
+}
+
+bool ContainerModel::removeContainer(size_t index) {
+    if (index >= containers_.size()) return false;
+    if (!ensureStorage()) return false;
+
+    containers_.erase(containers_.begin() + index);
+
+    if (containers_.empty()) {
+        activeIndex_ = -1;
+    } else if (activeIndex_ >= (int)containers_.size()) {
+        activeIndex_ = (int)containers_.size() - 1;
+    }
+
+    return save();
 }

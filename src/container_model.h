@@ -1,56 +1,71 @@
 #pragma once
 
-#include <stdint.h>
 #include <vector>
 #include <string>
+#include <stdint.h>
 
-// One key inside a container
+// Single key entry inside a container
 struct KeyEntry {
-    uint8_t     slot;      // key slot/index (0..N-1)
-    std::string label;     // "Patrol ENC", "FD CMD", etc.
-    std::string algo;      // "AES256", "AES128", "DES-OFB"
-    std::string keyHex;    // hex string, e.g. 64 chars for AES256
-    bool        selected;  // selected for load
+    uint8_t     slot;      // slot number (1..N)
+    std::string label;     // human-readable label
+    std::string algo;      // "AES256", "AES128", "DES-OFB", etc.
+    std::string keyHex;    // hex string
+    bool        selected;  // selected for keyload
 };
 
-// Container of keys (agency/profile)
+// Container of keys
 struct KeyContainer {
-    uint8_t                  id;      // internal ID / slot
-    std::string              label;   // "BSO - Patrol AES256"
-    std::string              agency;  // "Broward SO"
-    std::string              algo;    // default algo if not per-key
-    std::string              band;    // "700/800", "VHF"
-    bool                     hasKeys; // container has any live keys
-    bool                     locked;  // admin locked container
-    std::vector<KeyEntry>    keys;    // list of keys
+    uint8_t                  id;       // container ID
+    std::string              label;    // e.g. "BSO Patrol"
+    std::string              agency;   // e.g. "Broward SO"
+    std::string              algo;     // default algo for new keys
+    std::string              band;     // "700/800", "VHF", etc.
+    bool                     hasKeys;  // true if keys.size() > 0
+    bool                     locked;   // view-only if true
+    std::vector<KeyEntry>    keys;     // keys in this container
 };
 
+// Persistent model for all containers
 class ContainerModel {
 public:
     static ContainerModel& instance();
 
+    // Load from SPIFFS/SD JSON file
+    bool load();
+
+    // Save to SPIFFS/SD JSON file
+    bool save();
+
+    // Number of containers
     size_t getCount() const;
-    const KeyContainer& get(size_t idx) const;
-    KeyContainer&       getMutable(size_t idx);  // for UI edits
 
-    void   setActiveIndex(int idx);
-    int    getActiveIndex() const;
+    // Access containers
+    const KeyContainer& get(size_t index) const;
+    KeyContainer&       getMutable(size_t index);
+
+    // Active container
     const KeyContainer* getActive() const;
+    int                 getActiveIndex() const;
+    void                setActiveIndex(int idx);
 
-    // Persistence API
-    bool load();        // load from SPIFFS (if present)
-    bool save();        // save to SPIFFS
-    void resetToFactory(); // reset to built-in defaults + save
+    // CRUD
+    int  addContainer(const std::string& label,
+                      const std::string& agency,
+                      const std::string& band,
+                      const std::string& algo);
+
+    bool removeContainer(size_t index);
 
 private:
     ContainerModel();
+    ~ContainerModel() = default;
 
-    void seedDefaults();       // fill _containers with built-in defaults
-    bool ensureStorage();      // mount SPIFFS once
+    bool ensureStorage();
+    void initDefaults();
+    void normalizeFlags();
 
-    std::vector<KeyContainer> _containers;
-    int                       _activeIndex;
-
-    bool _storageInit = false;
-    bool _storageOK   = false;
+private:
+    std::vector<KeyContainer> containers_;
+    int                       activeIndex_;
+    bool                      storageReady_;
 };
