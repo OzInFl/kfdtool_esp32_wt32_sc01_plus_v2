@@ -1,5 +1,5 @@
 #include <Arduino.h>
-
+#include "container_model.h"
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include <lvgl.h>
@@ -179,6 +179,9 @@ void setup() {
   lcd.fillScreen(0x0000);
 
   setup_lvgl();
+
+  // Mount storage + load containers from SPIFFS/SD (or defaults)
+    ContainerModel::instance().load();
 
   // Build Motorola-style UI (roles + containers)
   ui_init();

@@ -1,20 +1,16 @@
 #include "ui.h"
+
 #include <lvgl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 
 #include "container_model.h"
+#include <esp_system.h>  // esp_random()
 
-#include <esp_system.h>  // for esp_random()
-
-// Some LVGL builds don't define LV_SYMBOL_KEY / LV_SYMBOL_TRASH; alias them
+// Some LVGL builds don't define LV_SYMBOL_KEY; alias it to another icon.
 #ifndef LV_SYMBOL_KEY
     #define LV_SYMBOL_KEY LV_SYMBOL_BELL
-#endif
-
-#ifndef LV_SYMBOL_TRASH
-    #define LV_SYMBOL_TRASH LV_SYMBOL_CLOSE
 #endif
 
 // ----------------------
@@ -26,44 +22,44 @@ enum UserRole {
     ROLE_ADMIN
 };
 
-static UserRole    current_role       = ROLE_NONE;
-static const char* current_user_name  = "NONE";
+static UserRole   current_role      = ROLE_NONE;
+static const char* current_user_name = "NONE";
 
-static const char* PIN_ADMIN          = "5000";
-static const char* PIN_OPERATOR       = "1111";
+// hard-coded PINs for now (like KVL profiles)
+static const char* PIN_ADMIN    = "5000";
+static const char* PIN_OPERATOR = "1111";
 
 // ----------------------
 // Screens
 // ----------------------
-static lv_obj_t* home_screen             = nullptr;
-static lv_obj_t* containers_screen       = nullptr;
-static lv_obj_t* keyload_screen          = nullptr;
-static lv_obj_t* settings_screen         = nullptr;
-static lv_obj_t* user_screen             = nullptr;
+static lv_obj_t* home_screen          = nullptr;
+static lv_obj_t* containers_screen    = nullptr;
+static lv_obj_t* keyload_screen       = nullptr;
+static lv_obj_t* settings_screen      = nullptr;
+static lv_obj_t* user_screen          = nullptr;
+
+// Container detail / key edit screens
 static lv_obj_t* container_detail_screen = nullptr;
 static lv_obj_t* key_edit_screen         = nullptr;
-static lv_obj_t* container_edit_screen   = nullptr;
 
-// ----------------------
 // Common widgets
-// ----------------------
-static lv_obj_t* status_label     = nullptr;
-static lv_obj_t* home_user_label  = nullptr;
+static lv_obj_t* status_label        = nullptr; // bottom bar status on home
+static lv_obj_t* home_user_label     = nullptr; // top bar user indicator
 
 // Keyload widgets
-static lv_obj_t*   keyload_status          = nullptr;
-static lv_obj_t*   keyload_bar             = nullptr;
-static lv_obj_t*   keyload_container_label = nullptr;
-static lv_timer_t* keyload_timer           = nullptr;
-static int         keyload_progress        = 0;
+static lv_obj_t* keyload_status          = nullptr;
+static lv_obj_t* keyload_bar             = nullptr;
+static lv_obj_t* keyload_container_label = nullptr;
+static lv_timer_t* keyload_timer         = nullptr;
+static int        keyload_progress       = 0;
 
 // User manager widgets
-static lv_obj_t* user_role_label   = nullptr;
-static lv_obj_t* pin_label         = nullptr;
-static lv_obj_t* user_status_label = nullptr;
+static lv_obj_t* user_role_label    = nullptr;
+static lv_obj_t* pin_label          = nullptr;
+static lv_obj_t* user_status_label  = nullptr;
 static char      pin_buffer[8];
-static uint8_t   pin_len      = 0;
-static UserRole  pending_role = ROLE_NONE;
+static uint8_t   pin_len            = 0;
+static UserRole  pending_role       = ROLE_NONE;
 
 // Container detail UI
 static lv_obj_t* container_keys_list     = nullptr;
@@ -71,93 +67,67 @@ static lv_obj_t* container_detail_status = nullptr;
 static int       current_container_index = -1;
 
 // Key edit UI
-static lv_obj_t* keyedit_label_ta        = nullptr;
-static lv_obj_t* keyedit_algo_dd         = nullptr;
-static lv_obj_t* keyedit_key_ta          = nullptr;
-static lv_obj_t* keyedit_selected_cb     = nullptr;
-static lv_obj_t* keyedit_status_label    = nullptr;
-static lv_obj_t* keyedit_kb              = nullptr;
-static lv_obj_t* keyedit_active_ta       = nullptr;
-static int       key_edit_container_idx  = -1;
-static int       key_edit_key_idx        = -1;
+static lv_obj_t* keyedit_label_ta       = nullptr;
+static lv_obj_t* keyedit_algo_dd        = nullptr;
+static lv_obj_t* keyedit_key_ta         = nullptr;
+static lv_obj_t* keyedit_selected_cb    = nullptr;
+static lv_obj_t* keyedit_status_label   = nullptr;
+static lv_obj_t* keyedit_kb             = nullptr;
+static lv_obj_t* keyedit_active_ta      = nullptr;
+static int       key_edit_container_idx = -1;  // which container
+static int       key_edit_key_idx       = -1;  // which key (-1 = new)
 
-// Container edit UI
-static lv_obj_t* cedit_label_ta          = nullptr;
-static lv_obj_t* cedit_agency_ta         = nullptr;
-static lv_obj_t* cedit_band_ta           = nullptr;
-static lv_obj_t* cedit_algo_dd           = nullptr;
-static lv_obj_t* cedit_locked_cb         = nullptr;
-static lv_obj_t* cedit_status_label      = nullptr;
-static lv_obj_t* cedit_kb                = nullptr;
-static int       cedit_index             = -1;
+// Delete container confirmation
+static lv_obj_t* container_delete_mbox  = nullptr;
 
-// Delete confirmation msgbox
-static lv_obj_t* container_delete_mbox   = nullptr;
-
-// ----------------------
 // Forward declarations
-// ----------------------
-
-// Screens
 static void build_home_screen(void);
 static void build_containers_screen(void);
 static void build_keyload_screen(void);
 static void build_settings_screen(void);
 static void build_user_screen(void);
-static void build_container_detail_screen(int container_index);
-static void build_key_edit_screen(int container_index, int key_index);
-static void build_container_edit_screen(int container_index);
 
-// Navigation
+static void build_container_detail_screen(int container_index);
+static void rebuild_container_keys_list(int container_index);
+static void build_key_edit_screen(int container_index, int key_index);
+
 static void show_home_screen(lv_event_t* e);
+static void show_containers_screen(lv_event_t* e);
 static void event_btn_keys(lv_event_t* e);
 static void event_btn_keyload(lv_event_t* e);
 static void event_btn_settings(lv_event_t* e);
 static void event_btn_user_manager(lv_event_t* e);
+static void event_btn_keyload_start(lv_event_t* e);
 
-// User manager callbacks
+// user manager callbacks
 static void event_select_admin(lv_event_t* e);
 static void event_select_operator(lv_event_t* e);
 static void event_keypad_digit(lv_event_t* e);
 static void event_keypad_clear(lv_event_t* e);
 static void event_keypad_ok(lv_event_t* e);
 
-// Container list/detail callbacks
+// containers callbacks
 static void container_btn_event(lv_event_t* e);
 static void event_add_container(lv_event_t* e);
-static void event_edit_container_meta(lv_event_t* e);
-static void event_delete_container(lv_event_t* e);
-static void event_delete_container_confirm(lv_event_t* e);
+
+// container detail callbacks
+static void key_item_event(lv_event_t* e);
 static void event_add_key(lv_event_t* e);
 static void event_set_active_container(lv_event_t* e);
-static void key_item_event(lv_event_t* e);
+static void event_delete_container(lv_event_t* e);
+static void event_delete_container_confirm(lv_event_t* e);
 
-// Key edit callbacks
+// key edit callbacks
 static void keyedit_textarea_event(lv_event_t* e);
-static void keyedit_keyboard_event(lv_event_t* e);
 static void event_keyedit_gen_random(lv_event_t* e);
 static void event_keyedit_save(lv_event_t* e);
 static void event_keyedit_cancel(lv_event_t* e);
-
-// Container edit callbacks
-static void cedit_textarea_event(lv_event_t* e);
-static void cedit_keyboard_event(lv_event_t* e);
-static void event_container_edit_save(lv_event_t* e);
-static void event_container_edit_cancel(lv_event_t* e);
-
-// Keyload
-static void event_btn_keyload_start(lv_event_t* e);
-static void keyload_timer_cb(lv_timer_t* t);
-
-// Helpers
-static void update_home_user_label();
-static bool check_access(bool admin_only, const char* action_name);
-static void update_keyload_container_label();
 
 // ----------------------
 // Styling helpers
 // ----------------------
 
+// Modern Motorola-style tile (APX-ish): dark slate + cyan accent, slightly rounded
 static void style_moto_tile_button(lv_obj_t* btn) {
     lv_obj_set_style_bg_color(btn, lv_color_hex(0x10202A), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
@@ -166,8 +136,8 @@ static void style_moto_tile_button(lv_obj_t* btn) {
     lv_obj_set_style_radius(btn, 4, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
 
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1C3A4A),
-                              LV_STATE_PRESSED | LV_PART_MAIN);
+    // pressed state – lighter fill
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x1C3A4A), LV_STATE_PRESSED | LV_PART_MAIN);
 }
 
 static void style_moto_screen(lv_obj_t* scr) {
@@ -195,6 +165,7 @@ static void update_home_user_label() {
     }
 }
 
+// Returns true if access is allowed. Also updates status_label.
 static bool check_access(bool admin_only, const char* action_name) {
     if (!status_label) return false;
 
@@ -215,47 +186,38 @@ static bool check_access(bool admin_only, const char* action_name) {
     return true;
 }
 
+// Update the label on the keyload screen with the currently active container
 static void update_keyload_container_label() {
     if (!keyload_container_label) return;
 
-    const ContainerModel& model = ContainerModel::instance();
+    ContainerModel& model = ContainerModel::instance();
     const KeyContainer* kc = model.getActive();
 
     if (!kc) {
-        lv_label_set_text(keyload_container_label, "ACTIVE: NONE");
-        return;
-    }
-
-    size_t selected_count = 0;
-    for (const auto& ke : kc->keys) {
-        if (ke.selected) ++selected_count;
-    }
-
-    if (selected_count == 0) {
-        lv_label_set_text_fmt(
-            keyload_container_label,
-            "ACTIVE: %s (0 selected)",
-            kc->label.c_str()
-        );
+        lv_label_set_text(keyload_container_label, "ACTIVE CONTAINER: NONE");
     } else {
         lv_label_set_text_fmt(
             keyload_container_label,
-            "ACTIVE: %s (%u selected)",
-            kc->label.c_str(),
-            (unsigned)selected_count
+            "ACTIVE: %s",
+            kc->label.c_str()
         );
     }
 }
 
 // ----------------------
-// HOME SCREEN
+// HOME SCREEN (Motorola-style)
 // ----------------------
 
 static void build_home_screen(void) {
+    if (home_screen) {
+        lv_obj_del(home_screen);
+        home_screen = nullptr;
+    }
+
     home_screen = lv_obj_create(NULL);
     style_moto_screen(home_screen);
 
-    // Top bar
+    // Top bar (Motorola-ish blue header)
     lv_obj_t* top_bar = lv_obj_create(home_screen);
     lv_obj_set_size(top_bar, 320, 44);
     lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
@@ -328,10 +290,45 @@ static void build_home_screen(void) {
 }
 
 // ----------------------
-// CONTAINERS SCREEN (inventory)
+// CONTAINERS SCREEN
 // ----------------------
 
+// Event callback for container selection
+static void container_btn_event(lv_event_t* e) {
+    uintptr_t idx_val = (uintptr_t) lv_event_get_user_data(e);
+    int idx = static_cast<int>(idx_val);
+
+    ContainerModel& model = ContainerModel::instance();
+    if (idx < 0 || static_cast<size_t>(idx) >= model.getCount()) return;
+
+    model.setActiveIndex(idx);
+    const KeyContainer& kc = model.get(idx);
+    current_container_index = idx;
+
+    if (status_label) {
+        lv_label_set_text_fmt(
+            status_label,
+            "CONTAINER SELECTED: %s",
+            kc.label.c_str()
+        );
+    }
+
+    // Refresh keyload screen's container label too
+    update_keyload_container_label();
+
+    // Open container detail screen
+    build_container_detail_screen(idx);
+    if (container_detail_screen) {
+        lv_scr_load(container_detail_screen);
+    }
+}
+
 static void build_containers_screen(void) {
+    if (containers_screen) {
+        lv_obj_del(containers_screen);
+        containers_screen = nullptr;
+    }
+
     containers_screen = lv_obj_create(NULL);
     style_moto_screen(containers_screen);
 
@@ -358,10 +355,10 @@ static void build_containers_screen(void) {
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " HOME");
     lv_obj_center(lbl_back);
 
-    // List
+    // List (dynamically from ContainerModel)
     lv_obj_t* list = lv_list_create(containers_screen);
-    lv_obj_set_size(list, 300, 280);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 45);
+    lv_obj_set_size(list, 300, 260);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 50);
     lv_obj_set_style_bg_color(list, lv_color_hex(0x05121A), 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(list, lv_color_hex(0x00C0FF), 0);
@@ -373,131 +370,181 @@ static void build_containers_screen(void) {
     for (size_t i = 0; i < count; ++i) {
         const KeyContainer& kc = model.get(i);
 
-        char buf[96];
-        lv_snprintf(
-            buf, sizeof(buf),
-            "%s (%s)",
-            kc.label.c_str(),
-            kc.agency.c_str()
-        );
-
-        lv_obj_t* btn = lv_list_add_btn(list, LV_SYMBOL_EDIT, buf);
-        lv_obj_add_event_cb(btn, container_btn_event, LV_EVENT_CLICKED,
-                            (void*)(uintptr_t)i);
+        lv_obj_t* btn = lv_list_add_btn(list, LV_SYMBOL_EDIT, kc.label.c_str());
+        lv_obj_add_event_cb(btn, container_btn_event, LV_EVENT_CLICKED, (void*) (uintptr_t) i);
     }
 
-    // Bottom "ADD CONTAINER"
-    lv_obj_t* bottom_bar = lv_obj_create(containers_screen);
-    lv_obj_set_size(bottom_bar, 320, 50);
-    lv_obj_align(bottom_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_clear_flag(bottom_bar, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(bottom_bar, lv_color_hex(0x001522), 0);
-    lv_obj_set_style_bg_opa(bottom_bar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(bottom_bar, 0, 0);
-
-    lv_obj_t* btn_add = lv_btn_create(bottom_bar);
-    lv_obj_set_size(btn_add, 180, 36);
-    lv_obj_align(btn_add, LV_ALIGN_CENTER, 0, 0);
-    style_moto_tile_button(btn_add);
-    lv_obj_add_event_cb(btn_add, event_add_container, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* lbl_add = lv_label_create(btn_add);
-    lv_label_set_text(lbl_add, LV_SYMBOL_PLUS " ADD CONTAINER");
-    lv_obj_center(lbl_add);
-}
-
-static void event_add_container(lv_event_t* e) {
-    (void)e;
-
-    if (!check_access(true, "ADD CONTAINER")) return;
-
-    ContainerModel& model = ContainerModel::instance();
-
-    int idx = model.addContainer(
-        "NEW CONTAINER",
-        "AGENCY",
-        "700/800",
-        "AES256"
-    );
-    if (idx < 0) {
-        if (status_label) {
-            lv_label_set_text(status_label, "FAILED TO CREATE CONTAINER");
-        }
-        return;
-    }
-
-    current_container_index = idx;
-    build_container_edit_screen(idx);
-    if (container_edit_screen) {
-        lv_scr_load(container_edit_screen);
-    }
-}
-
-static void container_btn_event(lv_event_t* e) {
-    uintptr_t idx_val = (uintptr_t) lv_event_get_user_data(e);
-    size_t idx = static_cast<size_t>(idx_val);
-
-    ContainerModel& model = ContainerModel::instance();
-    if (idx >= model.getCount()) return;
-
-    model.setActiveIndex(static_cast<int>(idx));
-    const KeyContainer& kc = model.get(idx);
-    current_container_index = static_cast<int>(idx);
-
-    if (status_label) {
-        lv_label_set_text_fmt(
-            status_label,
-            "CONTAINER SELECTED: %s",
-            kc.label.c_str()
-        );
-    }
-
-    update_keyload_container_label();
-
-    build_container_detail_screen(static_cast<int>(idx));
-    if (container_detail_screen) {
-        lv_scr_load(container_detail_screen);
-    }
+    // NEW CONTAINER (ADMIN-only)
+    lv_obj_t* btn_new = lv_btn_create(containers_screen);
+    lv_obj_set_size(btn_new, 200, 40);
+    lv_obj_align(btn_new, LV_ALIGN_BOTTOM_MID, 0, -10);
+    style_moto_tile_button(btn_new);
+    lv_obj_add_event_cb(btn_new, event_add_container, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_new = lv_label_create(btn_new);
+    lv_label_set_text(lbl_new, LV_SYMBOL_PLUS " NEW CONTAINER");
+    lv_obj_center(lbl_new);
 }
 
 // ----------------------
-// CONTAINER DETAIL (keys inside container)
+// CONTAINER DETAIL + KEYS
 // ----------------------
 
 static void rebuild_container_keys_list(int container_index) {
-    if (!container_keys_list) return;
-
-    lv_obj_clean(container_keys_list);
-
     ContainerModel& model = ContainerModel::instance();
-    if (container_index < 0 ||
-        static_cast<size_t>(container_index) >= model.getCount()) return;
+    if (container_index < 0 || static_cast<size_t>(container_index) >= model.getCount()) {
+        return;
+    }
 
     const KeyContainer& kc = model.get(container_index);
 
-    for (size_t i = 0; i < kc.keys.size(); ++i) {
-        const KeyEntry& ke = kc.keys[i];
+    if (container_keys_list) {
+        lv_obj_del(container_keys_list);
+        container_keys_list = nullptr;
+    }
 
-        char buf[96];
+    container_keys_list = lv_list_create(container_detail_screen);
+    lv_obj_set_size(container_keys_list, 300, 230);
+    lv_obj_align(container_keys_list, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_set_style_bg_color(container_keys_list, lv_color_hex(0x05121A), 0);
+    lv_obj_set_style_bg_opa(container_keys_list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(container_keys_list, lv_color_hex(0x00C0FF), 0);
+    lv_obj_set_style_border_width(container_keys_list, 1, 0);
+
+    for (size_t i = 0; i < kc.keys.size(); ++i) {
+        const KeySlot& ks = kc.keys[i];
+
+        char line[96];
         lv_snprintf(
-            buf, sizeof(buf),
-            "%02u: %s (%s)%s",
-            ke.slot,
-            ke.label.c_str(),
-            ke.algo.c_str(),
-            ke.selected ? " [SEL]" : ""
+            line, sizeof(line),
+            "%02u  %s (%s)%s",
+            (unsigned)(i + 1),
+            ks.label.c_str(),
+            ks.algo.c_str(),
+            ks.selected ? " [SEL]" : ""
         );
 
-        lv_obj_t* btn = lv_list_add_btn(container_keys_list, LV_SYMBOL_KEY, buf);
-        lv_obj_add_event_cb(btn, key_item_event, LV_EVENT_CLICKED,
-                            (void*)(uintptr_t)i);
+        lv_obj_t* btn = lv_list_add_btn(container_keys_list, LV_SYMBOL_KEY, line);
+        lv_obj_add_event_cb(btn, key_item_event, LV_EVENT_CLICKED, (void*)(uintptr_t)i);
+    }
+}
+
+static void build_container_detail_screen(int container_index) {
+    ContainerModel& model = ContainerModel::instance();
+    if (container_index < 0 || static_cast<size_t>(container_index) >= model.getCount()) {
+        return;
+    }
+    current_container_index = container_index;
+    const KeyContainer& kc = model.get(container_index);
+
+    if (container_detail_screen) {
+        lv_obj_del(container_detail_screen);
+        container_detail_screen = nullptr;
+    }
+
+    container_detail_screen = lv_obj_create(NULL);
+    style_moto_screen(container_detail_screen);
+
+    // Header
+    lv_obj_t* top_bar = lv_obj_create(container_detail_screen);
+    lv_obj_set_size(top_bar, 320, 40);
+    lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x001522), 0);
+    lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(top_bar, 0, 0);
+
+    lv_obj_t* title = lv_label_create(top_bar);
+    lv_label_set_text(title, "CONTAINER DETAIL");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00C0FF), 0);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
+
+    lv_obj_t* btn_back = lv_btn_create(top_bar);
+    lv_obj_set_size(btn_back, 80, 30);
+    lv_obj_align(btn_back, LV_ALIGN_RIGHT_MID, -4, 0);
+    style_moto_tile_button(btn_back);
+    lv_obj_add_event_cb(btn_back, show_containers_screen, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_back = lv_label_create(btn_back);
+    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " LIST");
+    lv_obj_center(lbl_back);
+
+    // Container meta panel
+    lv_obj_t* meta = lv_obj_create(container_detail_screen);
+    lv_obj_set_size(meta, 300, 70);
+    lv_obj_align(meta, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_clear_flag(meta, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(meta, lv_color_hex(0x05121A), 0);
+    lv_obj_set_style_bg_opa(meta, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(meta, lv_color_hex(0x00C0FF), 0);
+    lv_obj_set_style_border_width(meta, 1, 0);
+
+    lv_obj_t* label_line = lv_label_create(meta);
+    lv_label_set_text_fmt(label_line, "%s (%s)", kc.label.c_str(), kc.agency.c_str());
+    lv_obj_set_style_text_color(label_line, lv_color_hex(0xC8F4FF), 0);
+    lv_obj_align(label_line, LV_ALIGN_TOP_LEFT, 6, 4);
+
+    lv_obj_t* band_line = lv_label_create(meta);
+    lv_label_set_text_fmt(band_line, "%s / %s", kc.band.c_str(), kc.algo.c_str());
+    lv_obj_set_style_text_color(band_line, lv_color_hex(0x80E0FF), 0);
+    lv_obj_align(band_line, LV_ALIGN_TOP_LEFT, 6, 24);
+
+    lv_obj_t* lock_line = lv_label_create(meta);
+    lv_label_set_text_fmt(lock_line, "LOCKED: %s", kc.locked ? "YES" : "NO");
+    lv_obj_set_style_text_color(lock_line, lv_color_hex(kc.locked ? 0xFF8080 : 0x80FF80), 0);
+    lv_obj_align(lock_line, LV_ALIGN_TOP_LEFT, 6, 42);
+
+    // Keys list
+    rebuild_container_keys_list(container_index);
+
+    // Bottom actions: SET ACTIVE / ADD KEY / DELETE
+    lv_obj_t* btn_active = lv_btn_create(container_detail_screen);
+    lv_obj_set_size(btn_active, 90, 36);
+    lv_obj_align(btn_active, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    style_moto_tile_button(btn_active);
+    lv_obj_add_event_cb(btn_active, event_set_active_container, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_active = lv_label_create(btn_active);
+    lv_label_set_text(lbl_active, "SET ACTIVE");
+    lv_obj_center(lbl_active);
+
+    lv_obj_t* btn_add_key = lv_btn_create(container_detail_screen);
+    lv_obj_set_size(btn_add_key, 90, 36);
+    lv_obj_align(btn_add_key, LV_ALIGN_BOTTOM_MID, 0, -10);
+    style_moto_tile_button(btn_add_key);
+    lv_obj_add_event_cb(btn_add_key, event_add_key, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_add_key = lv_label_create(btn_add_key);
+    lv_label_set_text(lbl_add_key, LV_SYMBOL_KEY " ADD");
+    lv_obj_center(lbl_add_key);
+
+    lv_obj_t* btn_del = lv_btn_create(container_detail_screen);
+    lv_obj_set_size(btn_del, 90, 36);
+    lv_obj_align(btn_del, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    style_moto_tile_button(btn_del);
+    lv_obj_add_event_cb(btn_del, event_delete_container, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_del = lv_label_create(btn_del);
+    lv_label_set_text(lbl_del, "DELETE");
+    lv_obj_center(lbl_del);
+
+    // Local status line
+    container_detail_status = lv_label_create(container_detail_screen);
+    lv_label_set_text(container_detail_status, "CONTAINER READY");
+    lv_obj_set_style_text_color(container_detail_status, lv_color_hex(0x80E0FF), 0);
+    lv_obj_align(container_detail_status, LV_ALIGN_BOTTOM_LEFT, 8, -50);
+}
+
+// --- container detail events ---
+
+static void show_containers_screen(lv_event_t* e) {
+    (void)e;
+    build_containers_screen();
+    if (containers_screen) {
+        lv_scr_load(containers_screen);
     }
 }
 
 static void key_item_event(lv_event_t* e) {
-    uintptr_t key_idx_val = (uintptr_t) lv_event_get_user_data(e);
-    int key_idx = static_cast<int>(key_idx_val);
-
     if (current_container_index < 0) return;
+
+    uintptr_t idx_val = (uintptr_t) lv_event_get_user_data(e);
+    int key_idx = static_cast<int>(idx_val);
 
     build_key_edit_screen(current_container_index, key_idx);
     if (key_edit_screen) {
@@ -507,7 +554,12 @@ static void key_item_event(lv_event_t* e) {
 
 static void event_add_key(lv_event_t* e) {
     (void)e;
+
+    if (!check_access(false, "ADD KEY")) {
+        return;
+    }
     if (current_container_index < 0) return;
+
     build_key_edit_screen(current_container_index, -1);
     if (key_edit_screen) {
         lv_scr_load(key_edit_screen);
@@ -516,249 +568,107 @@ static void event_add_key(lv_event_t* e) {
 
 static void event_set_active_container(lv_event_t* e) {
     (void)e;
+
     if (current_container_index < 0) return;
 
     ContainerModel& model = ContainerModel::instance();
     model.setActiveIndex(current_container_index);
 
-    const KeyContainer& kc = model.get(current_container_index);
-
-    if (status_label) {
-        lv_label_set_text_fmt(
-            status_label,
-            "ACTIVE: %s",
-            kc.label.c_str()
-        );
+    if (container_detail_status) {
+        lv_label_set_text(container_detail_status, "ACTIVE CONTAINER SET");
     }
-
     update_keyload_container_label();
 }
 
-static void event_edit_container_meta(lv_event_t* e) {
+static void event_delete_container_confirm(lv_event_t* e) {
     (void)e;
+    if (!container_delete_mbox) return;
+
+    const char* btn_txt = lv_msgbox_get_active_btn_text(container_delete_mbox);
+    if (!btn_txt) {
+        lv_obj_del(container_delete_mbox);
+        container_delete_mbox = nullptr;
+        return;
+    }
+
+    bool delete_it = (strcmp(btn_txt, "DELETE") == 0);
+
+    lv_obj_del(container_delete_mbox);
+    container_delete_mbox = nullptr;
+
+    if (!delete_it) {
+        if (container_detail_status) {
+            lv_label_set_text(container_detail_status, "DELETE CANCELED");
+        }
+        return;
+    }
+
     if (current_container_index < 0) return;
 
-    if (!check_access(true, "EDIT CONTAINER")) return;
+    ContainerModel& model = ContainerModel::instance();
+    model.removeContainer(current_container_index);
+    current_container_index = -1;
 
-    build_container_edit_screen(current_container_index);
-    if (container_edit_screen) {
-        lv_scr_load(container_edit_screen);
+    if (status_label) {
+        lv_label_set_text(status_label, "CONTAINER DELETED");
+    }
+
+    build_containers_screen();
+    if (containers_screen) {
+        lv_scr_load(containers_screen);
     }
 }
 
-static void event_delete_container_confirm(lv_event_t* e);
-
 static void event_delete_container(lv_event_t* e) {
     (void)e;
-    if (current_container_index < 0) return;
 
     if (!check_access(true, "DELETE CONTAINER")) {
         return;
     }
 
-    ContainerModel& model = ContainerModel::instance();
-    if ((size_t)current_container_index >= model.getCount()) return;
+    if (current_container_index < 0) return;
 
+    ContainerModel& model = ContainerModel::instance();
+    if (static_cast<size_t>(current_container_index) >= model.getCount()) return;
     const KeyContainer& kc = model.get(current_container_index);
 
-    // If no keys, delete directly
+    // If no keys, delete immediately
     if (kc.keys.empty()) {
-        model.removeContainer(static_cast<size_t>(current_container_index));
+        model.removeContainer(current_container_index);
+        current_container_index = -1;
 
-        if (containers_screen) {
-            lv_obj_del(containers_screen);
-            containers_screen = nullptr;
+        if (status_label) {
+            lv_label_set_text(status_label, "CONTAINER DELETED");
         }
         build_containers_screen();
-        lv_scr_load(containers_screen);
+        if (containers_screen) {
+            lv_scr_load(containers_screen);
+        }
         return;
     }
 
-    // Has keys -> show confirmation msgbox
-    static const char* btns[] = { "Delete", "Cancel", "" };
-
+    // Has keys -> confirm
+    static const char* btns[] = { "DELETE", "CANCEL", nullptr };
     container_delete_mbox = lv_msgbox_create(
         NULL,
-        "DELETE CONTAINER?",
-        "This container has keys.\nDelete it permanently?",
+        "CONFIRM",
+        "Container contains keys.\nDelete container and all keys?",
         btns,
-        true
+        false
     );
     lv_obj_center(container_delete_mbox);
-    lv_obj_add_event_cb(container_delete_mbox,
-                        event_delete_container_confirm,
-                        LV_EVENT_VALUE_CHANGED,
-                        NULL);
-}
-
-static void event_delete_container_confirm(lv_event_t* e) {
-    lv_obj_t* mbox = lv_event_get_target(e);
-    const char* btn_txt = lv_msgbox_get_active_btn_text(mbox);
-
-    if (btn_txt && strcmp(btn_txt, "Delete") == 0) {
-        ContainerModel& model = ContainerModel::instance();
-        if (current_container_index >= 0 &&
-            (size_t)current_container_index < model.getCount()) {
-            model.removeContainer(static_cast<size_t>(current_container_index));
-        }
-
-        if (containers_screen) {
-            lv_obj_del(containers_screen);
-            containers_screen = nullptr;
-        }
-        build_containers_screen();
-        lv_scr_load(containers_screen);
-    } else {
-        // Cancel – stay on detail screen
-        if (container_detail_screen) {
-            lv_scr_load(container_detail_screen);
-        }
-    }
-
-    lv_obj_del(mbox);
-    container_delete_mbox = nullptr;
-}
-
-static void build_container_detail_screen(int container_index) {
-    current_container_index = container_index;
-
-    ContainerModel& model = ContainerModel::instance();
-    if (container_index < 0 ||
-        static_cast<size_t>(container_index) >= model.getCount()) return;
-    const KeyContainer& kc = model.get(container_index);
-
-    if (!container_detail_screen) {
-        container_detail_screen = lv_obj_create(NULL);
-        style_moto_screen(container_detail_screen);
-
-        // Header
-        lv_obj_t* top_bar = lv_obj_create(container_detail_screen);
-        lv_obj_set_size(top_bar, 320, 40);
-        lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
-        lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x001522), 0);
-        lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(top_bar, 0, 0);
-
-        lv_obj_t* title = lv_label_create(top_bar);
-        lv_label_set_text(title, "CONTAINER DETAIL");
-        lv_obj_set_style_text_color(title, lv_color_hex(0x00C0FF), 0);
-        lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
-
-        lv_obj_t* btn_back = lv_btn_create(top_bar);
-        lv_obj_set_size(btn_back, 80, 30);
-        lv_obj_align(btn_back, LV_ALIGN_RIGHT_MID, -4, 0);
-        style_moto_tile_button(btn_back);
-        lv_obj_add_event_cb(btn_back, [](lv_event_t* ev){
-            (void)ev;
-            if (containers_screen) {
-                lv_scr_load(containers_screen);
-            }
-        }, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_back = lv_label_create(btn_back);
-        lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " LIST");
-        lv_obj_center(lbl_back);
-
-        // Keys list
-        container_keys_list = lv_list_create(container_detail_screen);
-        lv_obj_set_size(container_keys_list, 300, 250);
-        lv_obj_align(container_keys_list, LV_ALIGN_TOP_MID, 0, 45);
-        lv_obj_set_style_bg_color(container_keys_list, lv_color_hex(0x05121A), 0);
-        lv_obj_set_style_bg_opa(container_keys_list, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(container_keys_list, lv_color_hex(0x00C0FF), 0);
-        lv_obj_set_style_border_width(container_keys_list, 1, 0);
-
-        // Bottom bar
-        lv_obj_t* bottom_bar = lv_obj_create(container_detail_screen);
-        lv_obj_set_size(bottom_bar, 320, 90);
-        lv_obj_align(bottom_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_clear_flag(bottom_bar, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(bottom_bar, lv_color_hex(0x001522), 0);
-        lv_obj_set_style_bg_opa(bottom_bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(bottom_bar, 0, 0);
-
-        container_detail_status = lv_label_create(bottom_bar);
-        lv_label_set_text(container_detail_status, "TAP KEY TO EDIT OR ADD");
-        lv_obj_set_style_text_color(container_detail_status, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(container_detail_status, LV_ALIGN_TOP_LEFT, 6, 4);
-
-        // Row of three buttons
-        lv_obj_t* btn_add = lv_btn_create(bottom_bar);
-        lv_obj_set_size(btn_add, 90, 32);
-        lv_obj_align(btn_add, LV_ALIGN_BOTTOM_LEFT, 6, -6);
-        style_moto_tile_button(btn_add);
-        lv_obj_add_event_cb(btn_add, event_add_key, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_add = lv_label_create(btn_add);
-        lv_label_set_text(lbl_add, LV_SYMBOL_PLUS " KEY");
-        lv_obj_center(lbl_add);
-
-        lv_obj_t* btn_edit = lv_btn_create(bottom_bar);
-        lv_obj_set_size(btn_edit, 90, 32);
-        lv_obj_align(btn_edit, LV_ALIGN_BOTTOM_MID, 0, -6);
-        style_moto_tile_button(btn_edit);
-        lv_obj_add_event_cb(btn_edit, event_edit_container_meta, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_edit = lv_label_create(btn_edit);
-        lv_label_set_text(lbl_edit, "EDIT");
-        lv_obj_center(lbl_edit);
-
-        lv_obj_t* btn_active = lv_btn_create(bottom_bar);
-        lv_obj_set_size(btn_active, 90, 32);
-        lv_obj_align(btn_active, LV_ALIGN_BOTTOM_RIGHT, -6, -6);
-        style_moto_tile_button(btn_active);
-        lv_obj_add_event_cb(btn_active, event_set_active_container, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_active = lv_label_create(btn_active);
-        lv_label_set_text(lbl_active, "ACTIVE");
-        lv_obj_center(lbl_active);
-
-        // Delete button row above
-        lv_obj_t* btn_delete = lv_btn_create(bottom_bar);
-        lv_obj_set_size(btn_delete, 160, 28);
-        lv_obj_align(btn_delete, LV_ALIGN_BOTTOM_MID, 0, -44);
-        style_moto_tile_button(btn_delete);
-        lv_obj_add_event_cb(btn_delete, event_delete_container, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_del = lv_label_create(btn_delete);
-        lv_label_set_text(lbl_del, LV_SYMBOL_TRASH " DELETE");
-        lv_obj_center(lbl_del);
-    }
-
-    rebuild_container_keys_list(container_index);
-
-    if (container_detail_status) {
-        lv_label_set_text_fmt(
-            container_detail_status,
-            "%s / %s  (%u keys)",
-            kc.agency.c_str(),
-            kc.label.c_str(),
-            (unsigned)kc.keys.size()
-        );
-    }
+    lv_obj_add_event_cb(container_delete_mbox, event_delete_container_confirm, LV_EVENT_VALUE_CHANGED, NULL);
 }
 
 // ----------------------
-// KEY EDIT SCREEN (tidied layout + keyboard logic)
+// KEY EDIT SCREEN
 // ----------------------
 
 static void keyedit_textarea_event(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t* ta = lv_event_get_target(e);
-
-    if (code == LV_EVENT_FOCUSED) {
-        keyedit_active_ta = ta;
-        if (keyedit_kb) {
-            lv_keyboard_set_textarea(keyedit_kb, ta);
-            lv_obj_clear_flag(keyedit_kb, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
-static void keyedit_keyboard_event(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    if (!keyedit_kb) return;
-
-    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
-        // Hide keyboard; user will use SAVE button to commit
-        lv_obj_add_flag(keyedit_kb, LV_OBJ_FLAG_HIDDEN);
-        keyedit_active_ta = nullptr;
+    keyedit_active_ta = ta;
+    if (keyedit_kb) {
+        lv_keyboard_set_textarea(keyedit_kb, ta);
     }
 }
 
@@ -766,38 +676,39 @@ static void event_keyedit_gen_random(lv_event_t* e) {
     (void)e;
     if (!keyedit_key_ta || !keyedit_algo_dd) return;
 
-    char algo_buf[32];
-    lv_dropdown_get_selected_str(keyedit_algo_dd, algo_buf, sizeof(algo_buf));
+    char algo[32] = {0};
+    lv_dropdown_get_selected_str(keyedit_algo_dd, algo, sizeof(algo));
 
-    size_t key_bytes = 32; // default AES256
-    if (strcmp(algo_buf, "AES128") == 0) {
-        key_bytes = 16;
-    } else if (strcmp(algo_buf, "DES-OFB") == 0) {
-        key_bytes = 8;
+    size_t key_bytes = 16; // default 128
+    if (strstr(algo, "256") != nullptr) {
+        key_bytes = 32;
     }
 
-    uint8_t buf[32];
-    if (key_bytes > sizeof(buf)) key_bytes = sizeof(buf);
-
-    for (size_t i = 0; i < key_bytes; i += 4) {
-        uint32_t r = esp_random();
-        size_t chunk = (key_bytes - i) < 4 ? (key_bytes - i) : 4;
-        memcpy(&buf[i], &r, chunk);
-    }
-
-    char hex[65];
-    size_t hex_len = key_bytes * 2;
-    if (hex_len >= sizeof(hex)) hex_len = sizeof(hex) - 1;
+    std::string hex;
+    hex.reserve(key_bytes * 2);
 
     for (size_t i = 0; i < key_bytes; ++i) {
-        sprintf(&hex[i * 2], "%02X", buf[i]);
+        uint8_t b = (uint8_t) esp_random();
+        char tmp[3];
+        snprintf(tmp, sizeof(tmp), "%02X", b);
+        hex += tmp;
     }
-    hex[hex_len] = '\0';
 
-    lv_textarea_set_text(keyedit_key_ta, hex);
-
+    lv_textarea_set_text(keyedit_key_ta, hex.c_str());
     if (keyedit_status_label) {
         lv_label_set_text(keyedit_status_label, "RANDOM KEY GENERATED");
+    }
+}
+
+static void event_keyedit_cancel(lv_event_t* e) {
+    (void)e;
+    if (current_container_index >= 0) {
+        build_container_detail_screen(current_container_index);
+        if (container_detail_screen) {
+            lv_scr_load(container_detail_screen);
+        }
+    } else {
+        show_containers_screen(nullptr);
     }
 }
 
@@ -807,433 +718,292 @@ static void event_keyedit_save(lv_event_t* e) {
     if (key_edit_container_idx < 0) return;
 
     ContainerModel& model = ContainerModel::instance();
-    if ((size_t)key_edit_container_idx >= model.getCount()) return;
-
+    if (static_cast<size_t>(key_edit_container_idx) >= model.getCount()) return;
     KeyContainer& kc = model.getMutable(key_edit_container_idx);
 
-    const char* label = lv_textarea_get_text(keyedit_label_ta);
-    const char* keyhx = lv_textarea_get_text(keyedit_key_ta);
+    const char* label_txt = keyedit_label_ta ? lv_textarea_get_text(keyedit_label_ta) : "";
+    const char* hex_txt   = keyedit_key_ta   ? lv_textarea_get_text(keyedit_key_ta)   : "";
 
-    char algo_buf[32];
-    lv_dropdown_get_selected_str(keyedit_algo_dd, algo_buf, sizeof(algo_buf));
+    char algo[32] = {0};
+    if (keyedit_algo_dd) {
+        lv_dropdown_get_selected_str(keyedit_algo_dd, algo, sizeof(algo));
+    }
 
-    bool selected = lv_obj_has_state(keyedit_selected_cb, LV_STATE_CHECKED);
+    bool selected = keyedit_selected_cb && lv_obj_has_state(keyedit_selected_cb, LV_STATE_CHECKED);
 
-    if (!label || strlen(label) == 0 || !keyhx || strlen(keyhx) < 16) {
+    if (!label_txt || strlen(label_txt) == 0) {
         if (keyedit_status_label) {
-            lv_label_set_text(keyedit_status_label, "LABEL/KEY TOO SHORT");
+            lv_label_set_text(keyedit_status_label, "LABEL REQUIRED");
         }
         return;
     }
 
-    if (key_edit_key_idx >= 0 &&
-        (size_t)key_edit_key_idx < kc.keys.size()) {
-        // Edit existing
-        KeyEntry& ke = kc.keys[key_edit_key_idx];
-        ke.label    = label;
-        ke.algo     = algo_buf;
-        ke.keyHex   = keyhx;
-        ke.selected = selected;
-    } else {
-        // New key
-        KeyEntry ke;
-        uint8_t max_slot = 0;
-        for (const auto& existing : kc.keys) {
-            if (existing.slot > max_slot) max_slot = existing.slot;
+    if (!hex_txt || strlen(hex_txt) < 2) {
+        if (keyedit_status_label) {
+            lv_label_set_text(keyedit_status_label, "KEY HEX REQUIRED");
         }
-        ke.slot     = max_slot + 1;
-        ke.label    = label;
-        ke.algo     = algo_buf;
-        ke.keyHex   = keyhx;
-        ke.selected = selected;
-        kc.keys.push_back(ke);
+        return;
     }
 
-    kc.hasKeys = !kc.keys.empty();
-    model.save();
+    std::string label = label_txt;
+    std::string hex   = hex_txt;
+    std::string algo_s = algo;
+
+    // normalize hex: strip spaces, ensure uppercase
+    std::string clean_hex;
+    clean_hex.reserve(hex.size());
+    for (char c : hex) {
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+        if (c >= 'a' && c <= 'f') c = c - 'a' + 'A';
+        clean_hex.push_back(c);
+    }
+
+    if (clean_hex.size() % 2 != 0) {
+        if (keyedit_status_label) {
+            lv_label_set_text(keyedit_status_label, "HEX LENGTH MUST BE EVEN");
+        }
+        return;
+    }
+
+    KeySlot slot;
+    slot.label    = label;
+    slot.algo     = algo_s;
+    slot.hex      = clean_hex;
+    slot.selected = selected;
+
+    // update or add
+    if (key_edit_key_idx >= 0 &&
+        static_cast<size_t>(key_edit_key_idx) < kc.keys.size()) {
+        model.updateKey(key_edit_container_idx, key_edit_key_idx, slot);
+    } else {
+        model.addKey(key_edit_container_idx, slot);
+    }
 
     if (keyedit_status_label) {
         lv_label_set_text(keyedit_status_label, "KEY SAVED");
     }
 
+    // Back to container detail
     build_container_detail_screen(key_edit_container_idx);
     if (container_detail_screen) {
         lv_scr_load(container_detail_screen);
     }
 }
 
-static void event_keyedit_cancel(lv_event_t* e) {
-    (void)e;
-    if (container_detail_screen) {
-        lv_scr_load(container_detail_screen);
-    }
-}
-
 static void build_key_edit_screen(int container_index, int key_index) {
+    ContainerModel& model = ContainerModel::instance();
+    if (container_index < 0 || static_cast<size_t>(container_index) >= model.getCount()) return;
+
     key_edit_container_idx = container_index;
     key_edit_key_idx       = key_index;
 
-    ContainerModel& model = ContainerModel::instance();
-    if (container_index < 0 ||
-        (size_t)container_index >= model.getCount()) return;
-    KeyContainer& kc = model.getMutable(container_index);
+    const KeyContainer& kc = model.get(container_index);
+    const KeySlot* ks = nullptr;
 
-    bool is_new = (key_index < 0 ||
-                   (size_t)key_index >= kc.keys.size());
-    KeyEntry* ke = nullptr;
-    if (!is_new) ke = &kc.keys[key_index];
-
-    if (!key_edit_screen) {
-        key_edit_screen = lv_obj_create(NULL);
-        style_moto_screen(key_edit_screen);
-
-        // Header
-        lv_obj_t* top_bar = lv_obj_create(key_edit_screen);
-        lv_obj_set_size(top_bar, 320, 40);
-        lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
-        lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x001522), 0);
-        lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(top_bar, 0, 0);
-
-        lv_obj_t* title = lv_label_create(top_bar);
-        lv_label_set_text(title, "KEY EDIT");
-        lv_obj_set_style_text_color(title, lv_color_hex(0x00C0FF), 0);
-        lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
-
-        lv_obj_t* btn_back = lv_btn_create(top_bar);
-        lv_obj_set_size(btn_back, 80, 30);
-        lv_obj_align(btn_back, LV_ALIGN_RIGHT_MID, -4, 0);
-        style_moto_tile_button(btn_back);
-        lv_obj_add_event_cb(btn_back, event_keyedit_cancel, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_back = lv_label_create(btn_back);
-        lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " BACK");
-        lv_obj_center(lbl_back);
-
-        // LABEL
-        lv_obj_t* lbl1 = lv_label_create(key_edit_screen);
-        lv_label_set_text(lbl1, "LABEL:");
-        lv_obj_set_style_text_color(lbl1, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl1, LV_ALIGN_TOP_LEFT, 10, 50);
-
-        keyedit_label_ta = lv_textarea_create(key_edit_screen);
-        lv_textarea_set_max_length(keyedit_label_ta, 32);
-        lv_obj_set_width(keyedit_label_ta, 280);
-        lv_obj_align(keyedit_label_ta, LV_ALIGN_TOP_MID, 0, 70);
-        lv_obj_add_event_cb(keyedit_label_ta, keyedit_textarea_event, LV_EVENT_ALL, NULL);
-
-        // ALGO
-        lv_obj_t* lbl2 = lv_label_create(key_edit_screen);
-        lv_label_set_text(lbl2, "ALGO:");
-        lv_obj_set_style_text_color(lbl2, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl2, LV_ALIGN_TOP_LEFT, 10, 105);
-
-        keyedit_algo_dd = lv_dropdown_create(key_edit_screen);
-        lv_dropdown_set_options_static(keyedit_algo_dd,
-                                       "AES256\nAES128\nDES-OFB");
-        lv_obj_set_width(keyedit_algo_dd, 140);
-        lv_obj_align(keyedit_algo_dd, LV_ALIGN_TOP_LEFT, 70, 100);
-
-        // Selected checkbox
-        keyedit_selected_cb = lv_checkbox_create(key_edit_screen);
-        lv_checkbox_set_text(keyedit_selected_cb, "Select for load");
-        lv_obj_set_style_text_color(keyedit_selected_cb, lv_color_hex(0xC8F4FF), 0);
-        lv_obj_align(keyedit_selected_cb, LV_ALIGN_TOP_RIGHT, -10, 100);
-
-        // KEY textarea
-        lv_obj_t* lbl3 = lv_label_create(key_edit_screen);
-        lv_label_set_text(lbl3, "KEY (HEX):");
-        lv_obj_set_style_text_color(lbl3, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl3, LV_ALIGN_TOP_LEFT, 10, 140);
-
-        keyedit_key_ta = lv_textarea_create(key_edit_screen);
-        lv_textarea_set_max_length(keyedit_key_ta, 64);
-        lv_textarea_set_one_line(keyedit_key_ta, false);
-        lv_obj_set_size(keyedit_key_ta, 300, 80);
-        lv_obj_align(keyedit_key_ta, LV_ALIGN_TOP_MID, 0, 160);
-        lv_obj_add_event_cb(keyedit_key_ta, keyedit_textarea_event, LV_EVENT_ALL, NULL);
-
-        // Status
-        keyedit_status_label = lv_label_create(key_edit_screen);
-        lv_label_set_text(keyedit_status_label, "EDIT OR GENERATE KEY");
-        lv_obj_set_style_text_color(keyedit_status_label, lv_color_hex(0xFFD0A0), 0);
-        lv_obj_align(keyedit_status_label, LV_ALIGN_TOP_LEFT, 10, 245);
-
-        // Buttons (just above keyboard zone)
-        lv_obj_t* btn_gen = lv_btn_create(key_edit_screen);
-        lv_obj_set_size(btn_gen, 130, 35);
-        lv_obj_align(btn_gen, LV_ALIGN_TOP_LEFT, 10, 275);
-        style_moto_tile_button(btn_gen);
-        lv_obj_add_event_cb(btn_gen, event_keyedit_gen_random, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_gen = lv_label_create(btn_gen);
-        lv_label_set_text(lbl_gen, "GEN RANDOM");
-        lv_obj_center(lbl_gen);
-
-        lv_obj_t* btn_save = lv_btn_create(key_edit_screen);
-        lv_obj_set_size(btn_save, 130, 35);
-        lv_obj_align(btn_save, LV_ALIGN_TOP_RIGHT, -10, 275);
-        style_moto_tile_button(btn_save);
-        lv_obj_add_event_cb(btn_save, event_keyedit_save, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_save = lv_label_create(btn_save);
-        lv_label_set_text(lbl_save, "SAVE");
-        lv_obj_center(lbl_save);
-
-        // On-screen keyboard (bottom 150px)
-        keyedit_kb = lv_keyboard_create(key_edit_screen);
-        lv_obj_set_size(keyedit_kb, 320, 150);
-        lv_obj_align(keyedit_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_add_event_cb(keyedit_kb, keyedit_keyboard_event, LV_EVENT_ALL, NULL);
-        lv_obj_add_flag(keyedit_kb, LV_OBJ_FLAG_HIDDEN); // hidden until focus
+    if (key_index >= 0 && static_cast<size_t>(key_index) < kc.keys.size()) {
+        ks = &kc.keys[key_index];
     }
 
-    // Populate fields
-    if (is_new) {
-        lv_textarea_set_text(keyedit_label_ta, "");
-        lv_dropdown_set_selected(keyedit_algo_dd, 0); // AES256
+    if (key_edit_screen) {
+        lv_obj_del(key_edit_screen);
+        key_edit_screen = nullptr;
+    }
+
+    key_edit_screen = lv_obj_create(NULL);
+    style_moto_screen(key_edit_screen);
+
+    // Header
+    lv_obj_t* top_bar = lv_obj_create(key_edit_screen);
+    lv_obj_set_size(top_bar, 320, 40);
+    lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x001522), 0);
+    lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(top_bar, 0, 0);
+
+    lv_obj_t* title = lv_label_create(top_bar);
+    lv_label_set_text(title, ks ? "EDIT KEY" : "ADD KEY");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00C0FF), 0);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
+
+    lv_obj_t* btn_back = lv_btn_create(top_bar);
+    lv_obj_set_size(btn_back, 80, 30);
+    lv_obj_align(btn_back, LV_ALIGN_RIGHT_MID, -4, 0);
+    style_moto_tile_button(btn_back);
+    lv_obj_add_event_cb(btn_back, event_keyedit_cancel, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_back = lv_label_create(btn_back);
+    lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " BACK");
+    lv_obj_center(lbl_back);
+
+    // Container label
+    lv_obj_t* cont_lbl = lv_label_create(key_edit_screen);
+    lv_label_set_text_fmt(cont_lbl, "CONTAINER: %s", kc.label.c_str());
+    lv_obj_set_style_text_color(cont_lbl, lv_color_hex(0xC8F4FF), 0);
+    lv_obj_align(cont_lbl, LV_ALIGN_TOP_LEFT, 10, 50);
+
+    // Key label
+    lv_obj_t* lbl_label = lv_label_create(key_edit_screen);
+    lv_label_set_text(lbl_label, "Key Label:");
+    lv_obj_set_style_text_color(lbl_label, lv_color_hex(0x80E0FF), 0);
+    lv_obj_align(lbl_label, LV_ALIGN_TOP_LEFT, 10, 75);
+
+    keyedit_label_ta = lv_textarea_create(key_edit_screen);
+    lv_obj_set_size(keyedit_label_ta, 200, 30);
+    lv_obj_align(keyedit_label_ta, LV_ALIGN_TOP_LEFT, 100, 70);
+    lv_textarea_set_max_length(keyedit_label_ta, 32);
+    lv_obj_add_event_cb(keyedit_label_ta, keyedit_textarea_event, LV_EVENT_FOCUSED, NULL);
+
+    // Algo dropdown
+    lv_obj_t* lbl_algo = lv_label_create(key_edit_screen);
+    lv_label_set_text(lbl_algo, "Algo:");
+    lv_obj_set_style_text_color(lbl_algo, lv_color_hex(0x80E0FF), 0);
+    lv_obj_align(lbl_algo, LV_ALIGN_TOP_LEFT, 10, 110);
+
+    keyedit_algo_dd = lv_dropdown_create(key_edit_screen);
+    lv_dropdown_set_options(keyedit_algo_dd,
+        "AES256\n"
+        "AES128\n"
+        "DES-OFB\n"
+        "ADP\n"
+        "Other"
+    );
+    lv_obj_set_width(keyedit_algo_dd, 120);
+    lv_obj_align(keyedit_algo_dd, LV_ALIGN_TOP_LEFT, 100, 104);
+
+    // Key hex
+    lv_obj_t* lbl_key = lv_label_create(key_edit_screen);
+    lv_label_set_text(lbl_key, "Key (HEX):");
+    lv_obj_set_style_text_color(lbl_key, lv_color_hex(0x80E0FF), 0);
+    lv_obj_align(lbl_key, LV_ALIGN_TOP_LEFT, 10, 145);
+
+    keyedit_key_ta = lv_textarea_create(key_edit_screen);
+    lv_obj_set_size(keyedit_key_ta, 260, 80);
+    lv_obj_align(keyedit_key_ta, LV_ALIGN_TOP_LEFT, 10, 165);
+    lv_textarea_set_max_length(keyedit_key_ta, 128);
+    lv_textarea_set_one_line(keyedit_key_ta, false);
+    lv_obj_add_event_cb(keyedit_key_ta, keyedit_textarea_event, LV_EVENT_FOCUSED, NULL);
+
+    // Selected checkbox
+    keyedit_selected_cb = lv_checkbox_create(key_edit_screen);
+    lv_checkbox_set_text(keyedit_selected_cb, "Selected for keyload");
+    lv_obj_set_style_text_color(keyedit_selected_cb, lv_color_hex(0xC8F4FF), 0);
+    lv_obj_align(keyedit_selected_cb, LV_ALIGN_TOP_LEFT, 10, 250);
+
+    // Status label
+    keyedit_status_label = lv_label_create(key_edit_screen);
+    lv_label_set_text(keyedit_status_label, "");
+    lv_obj_set_style_text_color(keyedit_status_label, lv_color_hex(0xFFD0A0), 0);
+    lv_obj_align(keyedit_status_label, LV_ALIGN_TOP_LEFT, 10, 275);
+
+    // Buttons: RANDOM / SAVE / CANCEL
+    lv_obj_t* btn_rand = lv_btn_create(key_edit_screen);
+    lv_obj_set_size(btn_rand, 90, 35);
+    lv_obj_align(btn_rand, LV_ALIGN_BOTTOM_LEFT, 10, -80);
+    style_moto_tile_button(btn_rand);
+    lv_obj_add_event_cb(btn_rand, event_keyedit_gen_random, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_rand = lv_label_create(btn_rand);
+    lv_label_set_text(lbl_rand, "RAND");
+    lv_obj_center(lbl_rand);
+
+    lv_obj_t* btn_save = lv_btn_create(key_edit_screen);
+    lv_obj_set_size(btn_save, 90, 35);
+    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_MID, 0, -80);
+    style_moto_tile_button(btn_save);
+    lv_obj_add_event_cb(btn_save, event_keyedit_save, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_save = lv_label_create(btn_save);
+    lv_label_set_text(lbl_save, "SAVE");
+    lv_obj_center(lbl_save);
+
+    lv_obj_t* btn_cancel = lv_btn_create(key_edit_screen);
+    lv_obj_set_size(btn_cancel, 90, 35);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_RIGHT, -10, -80);
+    style_moto_tile_button(btn_cancel);
+    lv_obj_add_event_cb(btn_cancel, event_keyedit_cancel, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "CANCEL");
+    lv_obj_center(lbl_cancel);
+
+    // Keyboard at bottom
+    keyedit_kb = lv_keyboard_create(key_edit_screen);
+    lv_obj_set_size(keyedit_kb, 320, 80);
+    lv_obj_align(keyedit_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+// Some LVGL builds don't define LV_KEYBOARD_MODE_TEXT; default mode is fine.
+ // lv_keyboard_set_mode(keyedit_kb, LV_KEYBOARD_MODE_TEXT);
+
+    lv_keyboard_set_textarea(keyedit_kb, keyedit_label_ta);
+    keyedit_active_ta = keyedit_label_ta;
+
+
+ // Populate fields if editing
+// helper: map algo string to dropdown index
+auto algo_to_index = [](const std::string& algo) -> uint16_t {
+    if (algo == "AES256")   return 0;
+    if (algo == "AES128")   return 1;
+    if (algo == "DES-OFB")  return 2;
+    if (algo == "ADP")      return 3;
+    if (algo == "Other")    return 4;
+    // default
+    return 0;
+};
+
+if (ks) {
+    lv_textarea_set_text(keyedit_label_ta, ks->label.c_str());
+    lv_textarea_set_text(keyedit_key_ta, ks->hex.c_str());
+    if (ks->selected) {
+        lv_obj_add_state(keyedit_selected_cb, LV_STATE_CHECKED);
+    } else {
         lv_obj_clear_state(keyedit_selected_cb, LV_STATE_CHECKED);
-        lv_textarea_set_text(keyedit_key_ta, "");
-        lv_label_set_text(keyedit_status_label, "NEW KEY - ENTER OR GENERATE");
-    } else if (ke) {
-        lv_textarea_set_text(keyedit_label_ta, ke->label.c_str());
-
-        if (ke->algo == "AES256")      lv_dropdown_set_selected(keyedit_algo_dd, 0);
-        else if (ke->algo == "AES128") lv_dropdown_set_selected(keyedit_algo_dd, 1);
-        else if (ke->algo == "DES-OFB")lv_dropdown_set_selected(keyedit_algo_dd, 2);
-        else                           lv_dropdown_set_selected(keyedit_algo_dd, 0);
-
-        if (ke->selected) {
-            lv_obj_add_state(keyedit_selected_cb, LV_STATE_CHECKED);
-        } else {
-            lv_obj_clear_state(keyedit_selected_cb, LV_STATE_CHECKED);
-        }
-
-        lv_textarea_set_text(keyedit_key_ta, ke->keyHex.c_str());
-        lv_label_set_text(keyedit_status_label, "EDIT EXISTING KEY");
     }
 
-    // Hide keyboard initially
-    if (keyedit_kb) {
-        lv_obj_add_flag(keyedit_kb, LV_OBJ_FLAG_HIDDEN);
-        keyedit_active_ta = nullptr;
-    }
+    uint16_t idx = algo_to_index(ks->algo);
+    lv_dropdown_set_selected(keyedit_algo_dd, idx);
+} else {
+    // new key; default algo from container
+    uint16_t idx = algo_to_index(kc.algo);
+    lv_dropdown_set_selected(keyedit_algo_dd, idx);
+}
+
+
 }
 
 // ----------------------
-// CONTAINER EDIT SCREEN (tidied layout + keyboard logic)
+// ADD CONTAINER (ADMIN)
 // ----------------------
 
-static void cedit_textarea_event(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t* ta = lv_event_get_target(e);
-
-    if (code == LV_EVENT_FOCUSED) {
-        if (cedit_kb) {
-            lv_keyboard_set_textarea(cedit_kb, ta);
-            lv_obj_clear_flag(cedit_kb, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-}
-
-static void cedit_keyboard_event(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    if (!cedit_kb) return;
-
-    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
-        lv_obj_add_flag(cedit_kb, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
-static void event_container_edit_save(lv_event_t* e) {
+static void event_add_container(lv_event_t* e) {
     (void)e;
-    if (cedit_index < 0) return;
+
+    if (!check_access(true, "ADD CONTAINER")) {
+        return;
+    }
 
     ContainerModel& model = ContainerModel::instance();
-    if ((size_t)cedit_index >= model.getCount()) return;
 
-    KeyContainer& kc = model.getMutable(cedit_index);
+    KeyContainer kc;
+    kc.label  = "NEW CONTAINER";
+    kc.agency = "AGENCY";
+    kc.band   = "BAND";
+    kc.algo   = "AES256";
+    kc.locked = false;
 
-    const char* label  = lv_textarea_get_text(cedit_label_ta);
-    const char* agency = lv_textarea_get_text(cedit_agency_ta);
-    const char* band   = lv_textarea_get_text(cedit_band_ta);
-
-    char algo_buf[32];
-    lv_dropdown_get_selected_str(cedit_algo_dd, algo_buf, sizeof(algo_buf));
-
-    bool locked = lv_obj_has_state(cedit_locked_cb, LV_STATE_CHECKED);
-
-    if (!label || strlen(label) == 0) {
-        if (cedit_status_label) {
-            lv_label_set_text(cedit_status_label, "LABEL REQUIRED");
+    int idx = model.addContainer(kc);
+    if (idx < 0) {
+        if (status_label) {
+            lv_label_set_text(status_label, "FAILED TO ADD CONTAINER");
         }
         return;
     }
 
-    kc.label  = label;
-    kc.agency = agency ? agency : "";
-    kc.band   = band   ? band   : "";
-    kc.algo   = algo_buf;
-    kc.locked = locked;
+    current_container_index = idx;
 
-    model.save();
-
-    if (cedit_status_label) {
-        lv_label_set_text(cedit_status_label, "CONTAINER SAVED");
+    if (status_label) {
+        lv_label_set_text(status_label, "CONTAINER ADDED");
     }
 
-    build_container_detail_screen(cedit_index);
+    build_container_detail_screen(idx);
     if (container_detail_screen) {
         lv_scr_load(container_detail_screen);
-    }
-}
-
-static void event_container_edit_cancel(lv_event_t* e) {
-    (void)e;
-    if (container_detail_screen) {
-        lv_scr_load(container_detail_screen);
-    }
-}
-
-static void build_container_edit_screen(int container_index) {
-    cedit_index = container_index;
-
-    ContainerModel& model = ContainerModel::instance();
-    if (container_index < 0 ||
-        (size_t)container_index >= model.getCount()) return;
-    KeyContainer& kc = model.getMutable(container_index);
-
-    if (!container_edit_screen) {
-        container_edit_screen = lv_obj_create(NULL);
-        style_moto_screen(container_edit_screen);
-
-        // Header
-        lv_obj_t* top_bar = lv_obj_create(container_edit_screen);
-        lv_obj_set_size(top_bar, 320, 40);
-        lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
-        lv_obj_clear_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x001522), 0);
-        lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(top_bar, 0, 0);
-
-        lv_obj_t* title = lv_label_create(top_bar);
-        lv_label_set_text(title, "CONTAINER EDIT");
-        lv_obj_set_style_text_color(title, lv_color_hex(0x00C0FF), 0);
-        lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
-
-        lv_obj_t* btn_back = lv_btn_create(top_bar);
-        lv_obj_set_size(btn_back, 80, 30);
-        lv_obj_align(btn_back, LV_ALIGN_RIGHT_MID, -4, 0);
-        style_moto_tile_button(btn_back);
-        lv_obj_add_event_cb(btn_back, event_container_edit_cancel, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_back = lv_label_create(btn_back);
-        lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " BACK");
-        lv_obj_center(lbl_back);
-
-        // LABEL
-        lv_obj_t* lbl1 = lv_label_create(container_edit_screen);
-        lv_label_set_text(lbl1, "LABEL:");
-        lv_obj_set_style_text_color(lbl1, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl1, LV_ALIGN_TOP_LEFT, 10, 50);
-
-        cedit_label_ta = lv_textarea_create(container_edit_screen);
-        lv_textarea_set_max_length(cedit_label_ta, 32);
-        lv_obj_set_width(cedit_label_ta, 280);
-        lv_obj_align(cedit_label_ta, LV_ALIGN_TOP_MID, 0, 70);
-        lv_obj_add_event_cb(cedit_label_ta, cedit_textarea_event, LV_EVENT_ALL, NULL);
-
-        // AGENCY
-        lv_obj_t* lbl2 = lv_label_create(container_edit_screen);
-        lv_label_set_text(lbl2, "AGENCY:");
-        lv_obj_set_style_text_color(lbl2, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl2, LV_ALIGN_TOP_LEFT, 10, 105);
-
-        cedit_agency_ta = lv_textarea_create(container_edit_screen);
-        lv_textarea_set_max_length(cedit_agency_ta, 32);
-        lv_obj_set_width(cedit_agency_ta, 280);
-        lv_obj_align(cedit_agency_ta, LV_ALIGN_TOP_MID, 0, 125);
-        lv_obj_add_event_cb(cedit_agency_ta, cedit_textarea_event, LV_EVENT_ALL, NULL);
-
-        // BAND
-        lv_obj_t* lbl3 = lv_label_create(container_edit_screen);
-        lv_label_set_text(lbl3, "BAND:");
-        lv_obj_set_style_text_color(lbl3, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl3, LV_ALIGN_TOP_LEFT, 10, 160);
-
-        cedit_band_ta = lv_textarea_create(container_edit_screen);
-        lv_textarea_set_max_length(cedit_band_ta, 16);
-        lv_obj_set_width(cedit_band_ta, 120);
-        lv_obj_align(cedit_band_ta, LV_ALIGN_TOP_LEFT, 70, 180);
-        lv_obj_add_event_cb(cedit_band_ta, cedit_textarea_event, LV_EVENT_ALL, NULL);
-
-        // ALGO dropdown
-        lv_obj_t* lbl4 = lv_label_create(container_edit_screen);
-        lv_label_set_text(lbl4, "DEFAULT ALGO:");
-        lv_obj_set_style_text_color(lbl4, lv_color_hex(0x80E0FF), 0);
-        lv_obj_align(lbl4, LV_ALIGN_TOP_RIGHT, -10, 160);
-
-        cedit_algo_dd = lv_dropdown_create(container_edit_screen);
-        lv_dropdown_set_options_static(cedit_algo_dd,
-                                       "AES256\nAES128\nDES-OFB");
-        lv_obj_set_width(cedit_algo_dd, 120);
-        lv_obj_align(cedit_algo_dd, LV_ALIGN_TOP_RIGHT, -10, 180);
-
-        // Locked checkbox
-        cedit_locked_cb = lv_checkbox_create(container_edit_screen);
-        lv_checkbox_set_text(cedit_locked_cb, "Lock container (view-only)");
-        lv_obj_set_style_text_color(cedit_locked_cb, lv_color_hex(0xC8F4FF), 0);
-        lv_obj_align(cedit_locked_cb, LV_ALIGN_TOP_LEFT, 10, 215);
-
-        // Status
-        cedit_status_label = lv_label_create(container_edit_screen);
-        lv_label_set_text(cedit_status_label, "EDIT CONTAINER METADATA");
-        lv_obj_set_style_text_color(cedit_status_label, lv_color_hex(0xFFD0A0), 0);
-        lv_obj_align(cedit_status_label, LV_ALIGN_TOP_LEFT, 10, 240);
-
-        // Buttons (above keyboard zone)
-        lv_obj_t* btn_save = lv_btn_create(container_edit_screen);
-        lv_obj_set_size(btn_save, 120, 35);
-        lv_obj_align(btn_save, LV_ALIGN_TOP_RIGHT, -10, 275);
-        style_moto_tile_button(btn_save);
-        lv_obj_add_event_cb(btn_save, event_container_edit_save, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_save = lv_label_create(btn_save);
-        lv_label_set_text(lbl_save, "SAVE");
-        lv_obj_center(lbl_save);
-
-        lv_obj_t* btn_cancel = lv_btn_create(container_edit_screen);
-        lv_obj_set_size(btn_cancel, 120, 35);
-        lv_obj_align(btn_cancel, LV_ALIGN_TOP_LEFT, 10, 275);
-        style_moto_tile_button(btn_cancel);
-        lv_obj_add_event_cb(btn_cancel, event_container_edit_cancel, LV_EVENT_CLICKED, NULL);
-        lv_obj_t* lbl_cancel = lv_label_create(btn_cancel);
-        lv_label_set_text(lbl_cancel, "CANCEL");
-        lv_obj_center(lbl_cancel);
-
-        // On-screen keyboard
-        cedit_kb = lv_keyboard_create(container_edit_screen);
-        lv_obj_set_size(cedit_kb, 320, 150);
-        lv_obj_align(cedit_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_obj_add_event_cb(cedit_kb, cedit_keyboard_event, LV_EVENT_ALL, NULL);
-        lv_obj_add_flag(cedit_kb, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    // Populate from kc
-    lv_textarea_set_text(cedit_label_ta, kc.label.c_str());
-    lv_textarea_set_text(cedit_agency_ta, kc.agency.c_str());
-    lv_textarea_set_text(cedit_band_ta, kc.band.c_str());
-
-    if (kc.algo == "AES256")      lv_dropdown_set_selected(cedit_algo_dd, 0);
-    else if (kc.algo == "AES128") lv_dropdown_set_selected(cedit_algo_dd, 1);
-    else if (kc.algo == "DES-OFB")lv_dropdown_set_selected(cedit_algo_dd, 2);
-    else                          lv_dropdown_set_selected(cedit_algo_dd, 0);
-
-    if (kc.locked)
-        lv_obj_add_state(cedit_locked_cb, LV_STATE_CHECKED);
-    else
-        lv_obj_clear_state(cedit_locked_cb, LV_STATE_CHECKED);
-
-    lv_label_set_text(cedit_status_label, "EDIT CONTAINER METADATA");
-
-    if (cedit_kb) {
-        lv_obj_add_flag(cedit_kb, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1251,9 +1021,7 @@ static void keyload_timer_cb(lv_timer_t* t) {
             keyload_timer = nullptr;
         }
         lv_label_set_text(keyload_status, "KEYLOAD COMPLETE - VERIFY RADIO");
-        if (status_label) {
-            lv_label_set_text(status_label, "KEYLOAD COMPLETE");
-        }
+        lv_label_set_text(status_label, "KEYLOAD COMPLETE");
     }
     lv_bar_set_value(keyload_bar, keyload_progress, LV_ANIM_ON);
 }
@@ -1261,11 +1029,13 @@ static void keyload_timer_cb(lv_timer_t* t) {
 static void event_btn_keyload_start(lv_event_t* e) {
     (void)e;
 
+    // For now OPERATORS and ADMIN can both keyload, but require login.
     if (!check_access(false, "KEYLOAD START")) {
         return;
     }
 
-    const ContainerModel& model = ContainerModel::instance();
+    // Require an active container
+    ContainerModel& model = ContainerModel::instance();
     const KeyContainer* kc = model.getActive();
     if (!kc) {
         lv_label_set_text(keyload_status, "NO ACTIVE CONTAINER");
@@ -1275,27 +1045,13 @@ static void event_btn_keyload_start(lv_event_t* e) {
         return;
     }
 
-    size_t selected_count = 0;
-    for (const auto& ke : kc->keys) {
-        if (ke.selected) ++selected_count;
-    }
-
-    if (selected_count == 0) {
-        lv_label_set_text(keyload_status, "NO KEYS SELECTED IN CONTAINER");
-        if (status_label) {
-            lv_label_set_text(status_label, "SELECT KEYS IN CONTAINER DETAIL");
-        }
-        return;
-    }
-
     keyload_progress = 0;
     lv_bar_set_value(keyload_bar, 0, LV_ANIM_OFF);
 
     lv_label_set_text_fmt(
         keyload_status,
-        "KEYLOAD: %s (%u keys)",
-        kc->label.c_str(),
-        (unsigned)selected_count
+        "KEYLOAD: %s",
+        kc->label.c_str()
     );
 
     if (!keyload_timer) {
@@ -1304,6 +1060,11 @@ static void event_btn_keyload_start(lv_event_t* e) {
 }
 
 static void build_keyload_screen(void) {
+    if (keyload_screen) {
+        lv_obj_del(keyload_screen);
+        keyload_screen = nullptr;
+    }
+
     keyload_screen = lv_obj_create(NULL);
     style_moto_screen(keyload_screen);
 
@@ -1330,7 +1091,7 @@ static void build_keyload_screen(void) {
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " HOME");
     lv_obj_center(lbl_back);
 
-    // Panel
+    // Connection + container panel
     lv_obj_t* panel = lv_obj_create(keyload_screen);
     lv_obj_set_size(panel, 300, 110);
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 50);
@@ -1361,8 +1122,10 @@ static void build_keyload_screen(void) {
     lv_bar_set_range(keyload_bar, 0, 100);
     lv_bar_set_value(keyload_bar, 0, LV_ANIM_OFF);
 
+    // LVGL 8 bar styling: main (background) + indicator
     lv_obj_set_style_bg_color(keyload_bar, lv_color_hex(0x1A2630), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(keyload_bar, LV_OPA_COVER, LV_PART_MAIN);
+
     lv_obj_set_style_bg_color(keyload_bar, lv_color_hex(0x00C0FF), LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(keyload_bar, LV_OPA_COVER, LV_PART_INDICATOR);
 
@@ -1372,7 +1135,7 @@ static void build_keyload_screen(void) {
     lv_obj_set_style_text_color(keyload_status, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(keyload_status, LV_ALIGN_CENTER, 0, 40);
 
-    // START button
+    // START / ARM button
     lv_obj_t* btn_start = lv_btn_create(keyload_screen);
     lv_obj_set_size(btn_start, 160, 55);
     lv_obj_align(btn_start, LV_ALIGN_CENTER, 0, 110);
@@ -1388,6 +1151,11 @@ static void build_keyload_screen(void) {
 // ----------------------
 
 static void build_settings_screen(void) {
+    if (settings_screen) {
+        lv_obj_del(settings_screen);
+        settings_screen = nullptr;
+    }
+
     settings_screen = lv_obj_create(NULL);
     style_moto_screen(settings_screen);
 
@@ -1413,6 +1181,7 @@ static void build_settings_screen(void) {
     lv_label_set_text(lbl_back, LV_SYMBOL_LEFT " HOME");
     lv_obj_center(lbl_back);
 
+    // Placeholder options / future wiring
     lv_obj_t* cb_confirm = lv_checkbox_create(settings_screen);
     lv_checkbox_set_text(cb_confirm, "Require PIN before keyload");
     lv_obj_set_style_text_color(cb_confirm, lv_color_hex(0xC8F4FF), 0);
@@ -1430,7 +1199,7 @@ static void build_settings_screen(void) {
 }
 
 // ----------------------
-// USER MANAGER
+// USER MANAGER (ADMIN / OPERATOR + PIN)
 // ----------------------
 
 static void reset_pin_buffer() {
@@ -1453,6 +1222,11 @@ static void set_pending_role(UserRole role, const char* label_text) {
 }
 
 static void build_user_screen(void) {
+    if (user_screen) {
+        lv_obj_del(user_screen);
+        user_screen = nullptr;
+    }
+
     user_screen = lv_obj_create(NULL);
     style_moto_screen(user_screen);
 
@@ -1519,13 +1293,8 @@ static void build_user_screen(void) {
     lv_obj_set_style_text_color(user_status_label, lv_color_hex(0xFFD0A0), 0);
     lv_obj_align(user_status_label, LV_ALIGN_TOP_MID, 0, 160);
 
-    // Numeric keypad
-    const char* keys[12] = {
-        "1","2","3",
-        "4","5","6",
-        "7","8","9",
-        "CLR","0","OK"
-    };
+    // Numeric keypad (3x4 matrix)
+    const char* keys[12] = { "1","2","3","4","5","6","7","8","9","CLR","0","OK" };
     int idx = 0;
     int start_y = 190;
 
@@ -1554,6 +1323,8 @@ static void build_user_screen(void) {
     reset_pin_buffer();
 }
 
+// ---- User manager callbacks ----
+
 static void event_select_admin(lv_event_t* e) {
     (void)e;
     set_pending_role(ROLE_ADMIN, "LOGIN: ADMIN");
@@ -1573,17 +1344,20 @@ static void event_keypad_digit(lv_event_t* e) {
     }
 
     if (pin_len >= sizeof(pin_buffer) - 1) {
+        // ignore extra digits
         return;
     }
 
     lv_obj_t* btn = lv_event_get_target(e);
     lv_obj_t* lbl = lv_obj_get_child(btn, 0);
     const char* txt = lv_label_get_text(lbl);
+
     if (!txt || strlen(txt) != 1) return;
 
     pin_buffer[pin_len++] = txt[0];
     pin_buffer[pin_len] = '\0';
 
+    // update **** display
     char stars[8];
     uint8_t count = (pin_len < (sizeof(stars) - 1)) ? pin_len : (sizeof(stars) - 1);
     for (uint8_t i = 0; i < count; ++i) {
@@ -1636,6 +1410,7 @@ static void event_keypad_ok(lv_event_t* e) {
         update_home_user_label();
         reset_pin_buffer();
 
+        // Return to home
         if (home_screen) {
             lv_scr_load(home_screen);
         }
@@ -1653,48 +1428,56 @@ static void event_keypad_ok(lv_event_t* e) {
 
 static void show_home_screen(lv_event_t* e) {
     (void)e;
+    if (!home_screen) {
+        build_home_screen();
+    }
     if (home_screen) {
         lv_scr_load(home_screen);
-        if (status_label) {
-            lv_label_set_text(status_label, "READY - LOGIN RECOMMENDED");
-        }
+        lv_label_set_text(status_label, "READY - LOGIN RECOMMENDED");
     }
 }
 
 static void event_btn_keys(lv_event_t* e) {
     (void)e;
 
-    if (!check_access(false, "CONTAINER VIEW OPEN")) return;
-
-    if (!containers_screen) {
-        build_containers_screen();
+    // Require any logged-in role
+    if (!check_access(false, "CONTAINER VIEW OPEN")) {
+        return;
     }
-    lv_scr_load(containers_screen);
+
+    build_containers_screen();
+    if (containers_screen) {
+        lv_scr_load(containers_screen);
+    }
 }
 
 static void event_btn_keyload(lv_event_t* e) {
     (void)e;
 
-    if (!check_access(false, "KEYLOAD CONSOLE OPEN")) return;
-
-    if (!keyload_screen) {
-        build_keyload_screen();
-    } else {
-        update_keyload_container_label();
+    // Require any logged-in role
+    if (!check_access(false, "KEYLOAD CONSOLE OPEN")) {
+        return;
     }
 
-    lv_scr_load(keyload_screen);
+    build_keyload_screen();
+    if (keyload_screen) {
+        update_keyload_container_label();
+        lv_scr_load(keyload_screen);
+    }
 }
 
 static void event_btn_settings(lv_event_t* e) {
     (void)e;
 
-    if (!check_access(true, "SETTINGS OPEN")) return;
-
-    if (!settings_screen) {
-        build_settings_screen();
+    // ADMIN-only
+    if (!check_access(true, "SETTINGS OPEN")) {
+        return;
     }
-    lv_scr_load(settings_screen);
+
+    build_settings_screen();
+    if (settings_screen) {
+        lv_scr_load(settings_screen);
+    }
 }
 
 static void event_btn_user_manager(lv_event_t* e) {
@@ -1702,10 +1485,10 @@ static void event_btn_user_manager(lv_event_t* e) {
     if (status_label) {
         lv_label_set_text(status_label, "USER LOGIN SCREEN");
     }
-    if (!user_screen) {
-        build_user_screen();
+    build_user_screen();
+    if (user_screen) {
+        lv_scr_load(user_screen);
     }
-    lv_scr_load(user_screen);
 }
 
 // ----------------------

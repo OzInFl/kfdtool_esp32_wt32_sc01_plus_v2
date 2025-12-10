@@ -3,266 +3,503 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <SPIFFS.h>
-#include <SD.h>
-#include <vector>
 
-#include <ArduinoJson.h>
+#if KFD_USE_SD
+  #include <SD.h>
+#endif
 
-static const char* CONTAINERS_PATH = "/containers.json";
+// Single file used for all container data
+static const char* KFD_CONTAINER_FILE = "/containers.dat";
+
+// --- helpers to access FS without pulling FS type into header ---
+
+static fs::FS& getFS_from_ptr(void* fsPtr) {
+    // ugly but effective: we know at call site whether it's SPIFFS or SD
+    return *reinterpret_cast<fs::FS*>(fsPtr);
+}
+
+// ---------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------
 
 ContainerModel& ContainerModel::instance() {
-    static ContainerModel inst;
-    return inst;
+    static ContainerModel m;
+    return m;
 }
 
 ContainerModel::ContainerModel()
-    : activeIndex_(-1),
-      storageReady_(false)
+: active_index_(-1),
+  storageReady_(false),
+  spiffsMounted_(false),
+  sdMounted_(false)
 {
-    load();
+    // In-memory defaults until load() is called.
+    loadDefaults();
 }
 
-bool ContainerModel::ensureStorage() {
-    if (storageReady_) return true;
-
-    // Prefer SPIFFS
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[ContainerModel] SPIFFS mount failed");
-        // You could also attempt SD here if you want:
-        // if (!SD.begin()) { ... }
-        return false;
-    }
-
-    storageReady_ = true;
-    return true;
-}
-
-void ContainerModel::initDefaults() {
-    containers_.clear();
-
-    // Example seed containers
-    KeyContainer c1;
-    c1.id      = 1;
-    c1.label   = "BSO Patrol";
-    c1.agency  = "Broward SO";
-    c1.algo    = "AES256";
-    c1.band    = "700/800";
-    c1.hasKeys = false;
-    c1.locked  = false;
-
-    KeyContainer c2;
-    c2.id      = 2;
-    c2.label   = "Plantation FD";
-    c2.agency  = "Plantation FD";
-    c2.algo    = "AES256";
-    c2.band    = "700/800";
-    c2.hasKeys = false;
-    c2.locked  = false;
-
-    containers_.push_back(c1);
-    containers_.push_back(c2);
-
-    activeIndex_ = 0;
-}
-
-void ContainerModel::normalizeFlags() {
-    for (auto& c : containers_) {
-        c.hasKeys = !c.keys.empty();
-    }
-}
-
-bool ContainerModel::load() {
-    if (!ensureStorage()) {
-        initDefaults();
-        return false;
-    }
-
-    if (!SPIFFS.exists(CONTAINERS_PATH)) {
-        Serial.println("[ContainerModel] containers.json not found, seeding defaults");
-        initDefaults();
-        save();
-        return true;
-    }
-
-    File f = SPIFFS.open(CONTAINERS_PATH, "r");
-    if (!f) {
-        Serial.println("[ContainerModel] Failed to open containers.json");
-        initDefaults();
-        return false;
-    }
-
-    DynamicJsonDocument doc(8192);
-    DeserializationError err = deserializeJson(doc, f);
-    f.close();
-
-    if (err) {
-        Serial.printf("[ContainerModel] JSON parse error: %s\n", err.c_str());
-        initDefaults();
-        return false;
-    }
-
-    containers_.clear();
-
-    JsonArray arr = doc["containers"].as<JsonArray>();
-    for (JsonVariant v : arr) {
-        KeyContainer kc;
-        kc.id      = v["id"]      | 0;
-        kc.label   = v["label"]   | "";
-        kc.agency  = v["agency"]  | "";
-        kc.algo    = v["algo"]    | "AES256";
-        kc.band    = v["band"]    | "";
-        kc.locked  = v["locked"]  | false;
-        kc.hasKeys = false;
-
-        kc.keys.clear();
-        JsonArray keys = v["keys"].as<JsonArray>();
-        for (JsonVariant kv : keys) {
-            KeyEntry ke;
-            ke.slot     = kv["slot"]     | 0;
-            ke.label    = kv["label"]    | "";
-            ke.algo     = kv["algo"]     | "AES256";
-            ke.keyHex   = kv["keyHex"]   | "";
-            ke.selected = kv["selected"] | false;
-            kc.keys.push_back(ke);
-        }
-
-        kc.hasKeys = !kc.keys.empty();
-        containers_.push_back(kc);
-    }
-
-    activeIndex_ = doc["activeIndex"] | -1;
-    if (activeIndex_ < 0 || activeIndex_ >= (int)containers_.size()) {
-        activeIndex_ = containers_.empty() ? -1 : 0;
-    }
-
-    normalizeFlags();
-    Serial.printf("[ContainerModel] Loaded %u containers, active=%d\n",
-                  (unsigned)containers_.size(), activeIndex_);
-
-    return true;
-}
-
-bool ContainerModel::save() {
-    if (!ensureStorage()) return false;
-
-    DynamicJsonDocument doc(8192);
-
-    JsonArray arr = doc.createNestedArray("containers");
-    for (const auto& kc : containers_) {
-        JsonObject o = arr.createNestedObject();
-        o["id"]      = kc.id;
-        o["label"]   = kc.label;
-        o["agency"]  = kc.agency;
-        o["algo"]    = kc.algo;
-        o["band"]    = kc.band;
-        o["locked"]  = kc.locked;
-
-        JsonArray keys = o.createNestedArray("keys");
-        for (const auto& ke : kc.keys) {
-            JsonObject kv = keys.createNestedObject();
-            kv["slot"]     = ke.slot;
-            kv["label"]    = ke.label;
-            kv["algo"]     = ke.algo;
-            kv["keyHex"]   = ke.keyHex;
-            kv["selected"] = ke.selected;
-        }
-    }
-
-    doc["activeIndex"] = activeIndex_;
-
-    File f = SPIFFS.open(CONTAINERS_PATH, "w");
-    if (!f) {
-        Serial.println("[ContainerModel] Failed to open containers.json for write");
-        return false;
-    }
-
-    if (serializeJson(doc, f) == 0) {
-        Serial.println("[ContainerModel] Failed to serialize JSON");
-        f.close();
-        return false;
-    }
-
-    f.close();
-    Serial.println("[ContainerModel] Saved containers.json");
-    return true;
-}
+// ---------------------------------------------------------------------
+// Public API – basic accessors
+// ---------------------------------------------------------------------
 
 size_t ContainerModel::getCount() const {
     return containers_.size();
 }
 
-const KeyContainer& ContainerModel::get(size_t index) const {
-    if (index >= containers_.size()) {
-        static KeyContainer dummy;
-        return dummy;
-    }
-    return containers_[index];
+const KeyContainer& ContainerModel::get(size_t idx) const {
+    return containers_.at(idx);
 }
 
-KeyContainer& ContainerModel::getMutable(size_t index) {
-    if (index >= containers_.size()) {
-        static KeyContainer dummy;
-        return dummy;
-    }
-    return containers_[index];
-}
-
-const KeyContainer* ContainerModel::getActive() const {
-    if (activeIndex_ < 0 || activeIndex_ >= (int)containers_.size()) return nullptr;
-    return &containers_[activeIndex_];
+KeyContainer& ContainerModel::getMutable(size_t idx) {
+    return containers_.at(idx);
 }
 
 int ContainerModel::getActiveIndex() const {
-    return activeIndex_;
+    return active_index_;
+}
+
+const KeyContainer* ContainerModel::getActive() const {
+    if (active_index_ < 0 || static_cast<size_t>(active_index_) >= containers_.size()) {
+        return nullptr;
+    }
+    return &containers_[active_index_];
 }
 
 void ContainerModel::setActiveIndex(int idx) {
-    if (idx < 0 || idx >= (int)containers_.size()) {
-        activeIndex_ = -1;
+    if (idx < 0 || static_cast<size_t>(idx) >= containers_.size()) {
+        active_index_ = -1;
     } else {
-        activeIndex_ = idx;
+        active_index_ = idx;
     }
+    // we persist the active index along with containers
     save();
 }
 
-int ContainerModel::addContainer(const std::string& label,
-                                 const std::string& agency,
-                                 const std::string& band,
-                                 const std::string& algo)
-{
-    if (!ensureStorage()) return -1;
+// ---------------------------------------------------------------------
+// Public API – container CRUD
+// ---------------------------------------------------------------------
 
-    KeyContainer kc;
-    kc.id      = static_cast<uint8_t>(containers_.size() + 1);
-    kc.label   = label;
-    kc.agency  = agency;
-    kc.band    = band;
-    kc.algo    = algo;
-    kc.hasKeys = false;
-    kc.locked  = false;
-    kc.keys.clear();
-
+int ContainerModel::addContainer(const KeyContainer& kc) {
     containers_.push_back(kc);
+    int idx = static_cast<int>(containers_.size() - 1);
 
-    if (activeIndex_ < 0) {
-        activeIndex_ = (int)containers_.size() - 1;
+    // If nothing active, make this one active.
+    if (active_index_ < 0) {
+        active_index_ = idx;
     }
 
     save();
-    return (int)containers_.size() - 1;
+    return idx;
 }
 
-bool ContainerModel::removeContainer(size_t index) {
-    if (index >= containers_.size()) return false;
-    if (!ensureStorage()) return false;
+bool ContainerModel::updateContainer(size_t idx, const KeyContainer& kc) {
+    if (idx >= containers_.size()) return false;
+    containers_[idx] = kc;
+    save();
+    return true;
+}
 
-    containers_.erase(containers_.begin() + index);
+bool ContainerModel::removeContainer(size_t idx) {
+    if (idx >= containers_.size()) return false;
+
+    containers_.erase(containers_.begin() + idx);
 
     if (containers_.empty()) {
-        activeIndex_ = -1;
-    } else if (activeIndex_ >= (int)containers_.size()) {
-        activeIndex_ = (int)containers_.size() - 1;
+        active_index_ = -1;
+    } else {
+        // keep active index sane
+        if (active_index_ >= static_cast<int>(containers_.size())) {
+            active_index_ = static_cast<int>(containers_.size()) - 1;
+        }
     }
 
-    return save();
+    save();
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Public API – key CRUD
+// ---------------------------------------------------------------------
+
+int ContainerModel::addKey(size_t containerIdx, const KeySlot& key) {
+    if (containerIdx >= containers_.size()) return -1;
+    KeyContainer& kc = containers_[containerIdx];
+    kc.keys.push_back(key);
+    int keyIdx = static_cast<int>(kc.keys.size() - 1);
+    save();
+    return keyIdx;
+}
+
+bool ContainerModel::updateKey(size_t containerIdx, size_t keyIdx, const KeySlot& key) {
+    if (containerIdx >= containers_.size()) return false;
+    KeyContainer& kc = containers_[containerIdx];
+    if (keyIdx >= kc.keys.size()) return false;
+    kc.keys[keyIdx] = key;
+    save();
+    return true;
+}
+
+bool ContainerModel::removeKey(size_t containerIdx, size_t keyIdx) {
+    if (containerIdx >= containers_.size()) return false;
+    KeyContainer& kc = containers_[containerIdx];
+    if (keyIdx >= kc.keys.size()) return false;
+
+    kc.keys.erase(kc.keys.begin() + keyIdx);
+    save();
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// Defaults (used when no file on SPIFFS/SD)
+// ---------------------------------------------------------------------
+
+void ContainerModel::loadDefaults() {
+    containers_.clear();
+    active_index_ = -1;
+
+    // Example default container(s) – safe demo values only
+    KeyContainer c1;
+    c1.label  = "DEMO - AES256 Patrol";
+    c1.agency = "Demo Agency";
+    c1.band   = "700/800";
+    c1.algo   = "AES256";
+    c1.locked = false;
+
+    KeySlot k1;
+    k1.label    = "TG 1 - PATROL";
+    k1.algo     = "AES256";
+    k1.hex      = "00112233445566778899AABBCCDDEEFF";
+    k1.selected = true;
+    c1.keys.push_back(k1);
+
+    KeySlot k2;
+    k2.label    = "TG 2 - TAC";
+    k2.algo     = "AES256";
+    k2.hex      = "FFEEDDCCBBAA99887766554433221100";
+    k2.selected = false;
+    c1.keys.push_back(k2);
+
+    containers_.push_back(c1);
+    active_index_ = 0;
+}
+
+// ---------------------------------------------------------------------
+// Persistence – load/save entrypoints
+// ---------------------------------------------------------------------
+
+bool ContainerModel::load() {
+    if (!ensureStorage()) {
+        Serial.println("[ContainerModel] Storage not ready, using defaults in RAM");
+        loadDefaults();
+        return false;
+    }
+
+    bool ok = false;
+
+#if KFD_USE_SD
+    if (sdMounted_) {
+        ok = loadFromFS((void*)&SD, true);
+    }
+#endif
+    if (!ok && spiffsMounted_) {
+        ok = loadFromFS((void*)&SPIFFS, false);
+    }
+
+    if (!ok) {
+        Serial.println("[ContainerModel] No container file; building defaults");
+        loadDefaults();
+        // Save defaults so next boot sees something
+        save();
+    }
+
+    return ok;
+}
+
+bool ContainerModel::save() {
+    if (!ensureStorage()) {
+        Serial.println("[ContainerModel] Storage not ready, cannot save");
+        return false;
+    }
+
+    bool ok = false;
+
+#if KFD_USE_SD
+    if (sdMounted_) {
+        ok = saveToFS((void*)&SD, true);
+    }
+#endif
+    if (!ok && spiffsMounted_) {
+        ok = saveToFS((void*)&SPIFFS, false);
+    }
+
+    if (!ok) {
+        Serial.println("[ContainerModel] Failed to save containers.dat");
+    }
+
+    return ok;
+}
+
+// ---------------------------------------------------------------------
+// Persistence – mount FS
+// ---------------------------------------------------------------------
+
+bool ContainerModel::ensureStorage() {
+    if (storageReady_) return true;
+
+    // SPIFFS first
+    if (!spiffsMounted_) {
+        if (!SPIFFS.begin(true)) {
+            Serial.println("[ContainerModel] SPIFFS.begin() failed");
+        } else {
+            spiffsMounted_ = true;
+        }
+    }
+
+#if KFD_USE_SD
+    if (!sdMounted_) {
+        if (!SD.begin()) {
+            Serial.println("[ContainerModel] SD.begin() failed");
+        } else {
+            sdMounted_ = true;
+        }
+    }
+#endif
+
+    storageReady_ = spiffsMounted_ || sdMounted_;
+    return storageReady_;
+}
+
+// ---------------------------------------------------------------------
+// Persistence – simple text format encoder/decoder
+//
+// File format (line-based):
+//   HDR|KFDv1|<active_index>
+//   C|label|agency|band|algo|locked
+//   K|label|algo|hex|selected
+//   K|...
+//   C|...
+//
+// Fields are '|' separated. We escape '|' and '\n' in strings as \| and \n.
+// ---------------------------------------------------------------------
+
+static String escapeField(const std::string& s) {
+    String out;
+    out.reserve(s.size() + 4);
+    for (char c : s) {
+        if (c == '|' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n' || c == '\r') {
+            out += "\\n";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+static std::string unescapeField(const String& s) {
+    std::string out;
+    out.reserve(s.length());
+    bool esc = false;
+    for (size_t i = 0; i < s.length(); ++i) {
+        char c = s[i];
+        if (!esc) {
+            if (c == '\\') {
+                esc = true;
+            } else {
+                out.push_back(c);
+            }
+        } else {
+            if (c == 'n') {
+                out.push_back('\n');
+            } else {
+                out.push_back(c);
+            }
+            esc = false;
+        }
+    }
+    return out;
+}
+
+static std::vector<String> splitLine(const String& line) {
+    std::vector<String> parts;
+    String current;
+    bool esc = false;
+
+    for (size_t i = 0; i < line.length(); ++i) {
+        char c = line[i];
+        if (!esc) {
+            if (c == '\\') {
+                esc = true;
+            } else if (c == '|') {
+                parts.push_back(current);
+                current = "";
+            } else {
+                current += c;
+            }
+        } else {
+            // part of escape
+            current += c;
+            esc = false;
+        }
+    }
+    parts.push_back(current);
+    return parts;
+}
+
+bool ContainerModel::loadFromFS(void* fsPtr, bool useSD) {
+    fs::FS& fs = getFS_from_ptr(fsPtr);
+
+    if (!fs.exists(KFD_CONTAINER_FILE)) {
+        Serial.printf("[ContainerModel] %s: %s does not exist\n",
+                      useSD ? "SD" : "SPIFFS", KFD_CONTAINER_FILE);
+        return false;
+    }
+
+    File f = fs.open(KFD_CONTAINER_FILE, "r");
+    if (!f) {
+        Serial.printf("[ContainerModel] %s: open(%s) failed\n",
+                      useSD ? "SD" : "SPIFFS", KFD_CONTAINER_FILE);
+        return false;
+    }
+
+    containers_.clear();
+    active_index_ = -1;
+
+    int fileActiveIndex = -1;
+    KeyContainer current;
+    bool haveCurrent = false;
+
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.isEmpty()) continue;
+
+        auto parts = splitLine(line);
+        if (parts.empty()) continue;
+
+        if (parts[0] == "HDR") {
+            if (parts.size() >= 3) {
+                fileActiveIndex = parts[2].toInt();
+            }
+        } else if (parts[0] == "C") {
+            // flush previous container
+            if (haveCurrent) {
+                containers_.push_back(current);
+                current = KeyContainer{};
+            }
+            haveCurrent = true;
+
+            if (parts.size() >= 6) {
+                current.label  = unescapeField(parts[1]);
+                current.agency = unescapeField(parts[2]);
+                current.band   = unescapeField(parts[3]);
+                current.algo   = unescapeField(parts[4]);
+                current.locked = (parts[5].toInt() != 0);
+            }
+        } else if (parts[0] == "K") {
+            if (!haveCurrent) {
+                // malformed, ignore
+                continue;
+            }
+            if (parts.size() >= 5) {
+                KeySlot k;
+                k.label    = unescapeField(parts[1]);
+                k.algo     = unescapeField(parts[2]);
+                k.hex      = unescapeField(parts[3]);
+                k.selected = (parts[4].toInt() != 0);
+                current.keys.push_back(k);
+            }
+        }
+    }
+
+    if (haveCurrent) {
+        containers_.push_back(current);
+    }
+
+    f.close();
+
+    if (containers_.empty()) {
+        Serial.println("[ContainerModel] File had no containers, using defaults");
+        loadDefaults();
+        return false;
+    }
+
+    if (fileActiveIndex >= 0 &&
+        static_cast<size_t>(fileActiveIndex) < containers_.size()) {
+        active_index_ = fileActiveIndex;
+    } else {
+        active_index_ = 0;
+    }
+
+    Serial.printf("[ContainerModel] Loaded %u containers from %s\n",
+                  (unsigned)containers_.size(),
+                  useSD ? "SD" : "SPIFFS");
+    return true;
+}
+
+bool ContainerModel::saveToFS(void* fsPtr, bool useSD) {
+    fs::FS& fs = getFS_from_ptr(fsPtr);
+
+    // write atomically via temp file
+    const char* tmpFile = "/containers.tmp";
+
+    fs.remove(tmpFile);
+    File f = fs.open(tmpFile, "w");
+    if (!f) {
+        Serial.printf("[ContainerModel] %s: open(%s) for write failed\n",
+                      useSD ? "SD" : "SPIFFS", tmpFile);
+        return false;
+    }
+
+    // header
+    f.printf("HDR|KFDv1|%d\n", active_index_);
+
+    for (size_t i = 0; i < containers_.size(); ++i) {
+        const KeyContainer& c = containers_[i];
+
+        String lineC = "C|";
+        lineC += escapeField(c.label);
+        lineC += "|";
+        lineC += escapeField(c.agency);
+        lineC += "|";
+        lineC += escapeField(c.band);
+        lineC += "|";
+        lineC += escapeField(c.algo);
+        lineC += "|";
+        lineC += (c.locked ? "1" : "0");
+        lineC += "\n";
+        f.print(lineC);
+
+        for (size_t kIdx = 0; kIdx < c.keys.size(); ++kIdx) {
+            const KeySlot& k = c.keys[kIdx];
+
+            String lineK = "K|";
+            lineK += escapeField(k.label);
+            lineK += "|";
+            lineK += escapeField(k.algo);
+            lineK += "|";
+            lineK += escapeField(k.hex);
+            lineK += "|";
+            lineK += (k.selected ? "1" : "0");
+            lineK += "\n";
+            f.print(lineK);
+        }
+    }
+
+    f.flush();
+    f.close();
+
+    // replace old file
+    fs.remove(KFD_CONTAINER_FILE);
+    if (!fs.rename(tmpFile, KFD_CONTAINER_FILE)) {
+        Serial.printf("[ContainerModel] %s: rename(%s -> %s) failed\n",
+                      useSD ? "SD" : "SPIFFS", tmpFile, KFD_CONTAINER_FILE);
+        return false;
+    }
+
+    Serial.printf("[ContainerModel] Saved %u containers to %s\n",
+                  (unsigned)containers_.size(),
+                  useSD ? "SD" : "SPIFFS");
+    return true;
 }
