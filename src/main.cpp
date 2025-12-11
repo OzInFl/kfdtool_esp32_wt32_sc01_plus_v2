@@ -224,21 +224,21 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
-  // Periodic container autosave (non-blocking most of the time)
-  ContainerModel::instance().service();
+  // No autosave; persistence only via explicit Save Now / Factory Reset
 
   // simple timing / debouncing
   static uint32_t last = millis();
   uint32_t now = millis();
   if (now - last > 5) {
-    last = now;
+      last = now;
   }
 
   static int32_t x, y;
   if (lcd.getTouch(&x, &y)) {
-    delay(50);
+      delay(50);
   } else {
-    delay(5);
+      delay(5);
   }
 }
+
 

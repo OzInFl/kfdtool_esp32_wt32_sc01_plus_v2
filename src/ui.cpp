@@ -443,8 +443,15 @@ static void build_container_detail_screen(int container_index) {
     const KeyContainer& kc = model.get(container_index);
 
     if (container_detail_screen) {
+          // Delete the old detail screen and all its children.
+        // IMPORTANT: also clear any global child pointers that pointed into it,
+        // so we don't double-delete them later.
         lv_obj_del(container_detail_screen);
-        container_detail_screen = nullptr;
+        container_detail_screen    = nullptr;
+        container_keys_list        = nullptr;
+        container_detail_status    = nullptr;
+        // (container_delete_mbox is created as a child too, but it's always
+        // managed within its own confirm handler; we don't need to touch it here.)
     }
 
     container_detail_screen = lv_obj_create(NULL);
@@ -904,6 +911,14 @@ static void build_key_edit_screen(int container_index, int key_index) {
     if (key_edit_screen) {
         lv_obj_del(key_edit_screen);
         key_edit_screen = nullptr;
+        
+        keyedit_label_ta     = nullptr;
+        keyedit_algo_dd      = nullptr;
+        keyedit_key_ta       = nullptr;
+        keyedit_selected_cb  = nullptr;
+        keyedit_status_label = nullptr;
+        keyedit_kb           = nullptr;
+        keyedit_active_ta    = nullptr;
     }
 
     key_edit_screen = lv_obj_create(NULL);

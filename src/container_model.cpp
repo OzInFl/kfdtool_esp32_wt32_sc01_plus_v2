@@ -352,17 +352,18 @@ bool ContainerModel::factoryReset() {
 
 // Periodic background flush (call from loop()).
 void ContainerModel::service() {
-    if (!dirty_) return;
-
-    uint32_t now = millis();
-    const uint32_t MIN_SETTLE_MS   = 1000; // wait for edits to settle
-    const uint32_t MIN_INTERVAL_MS = 2000; // don't hammer flash
-
-    if (now - last_change_ms_ < MIN_SETTLE_MS) return;
-    if (now - last_save_ms_   < MIN_INTERVAL_MS) return;
-
-    // Try to flush; if it fails, we'll stay dirty_ = true and try again later.
-    (void)saveNow();
+    //                if (!dirty_) return;
+//
+ //                   uint32_t now = millis();
+ //                   const uint32_t MIN_SETTLE_MS   = 1000; // wait for edits to settle
+ //                   const uint32_t MIN_INTERVAL_MS = 2000; // don't hammer flash
+//
+//                    if (now - last_change_ms_ < MIN_SETTLE_MS) return;
+//                    if (now - last_save_ms_   < MIN_INTERVAL_MS) return;
+//
+//
+//                    // Try to flush; if it fails, we'll stay dirty_ = true and try again later.
+//                    (void)saveNow();
 }
 
 // ----- CRUD -----
