@@ -1,52 +1,79 @@
 #pragma once
+
+#include <Arduino.h>
 #include <vector>
 #include <string>
+#include <stdint.h>
 
+// A single key entry inside an encrypted key container file.
+// This is *not* the same as the UI "KeySlot" in ContainerModel.
 struct KeyEntry {
-  uint16_t keysetId;
-  uint16_t keyId;
-  uint8_t algorithmId;
-  std::vector<uint8_t> keyData; // raw key bytes (16 or 32)
+    uint16_t             keysetId;    // logical keyset
+    uint16_t             keyId;       // per-key ID
+    uint8_t              algorithmId; // e.g. AES, DES, ADP mapping
+    std::vector<uint8_t> keyData;     // raw key bytes
 };
 
-class KeyContainer {
-public:
-  std::string name;
-  std::string description;
-  std::vector<KeyEntry> keys;
+// A key container file as stored on internal FS (e.g. LittleFS) or SD.
+struct KeyContainer {
+    std::string           name;        // container name / label
+    std::string           description; // optional description
+    std::vector<KeyEntry> keys;        // keys in this container
 
-  bool isValid() const { return !keys.empty(); }
+    // Basic sanity check used by higher-level code (e.g. KFDProtocol).
+    bool isValid() const {
+        // For now, "valid" just means "has at least one key".
+        // You can tighten this later (e.g. require non-empty name).
+        return !keys.empty();
+    }
 };
 
+// Manager for on-device key containers stored under LittleFS.
+// This is a low-level storage/crypto layer, *separate* from the UI
+// "ContainerModel" (which handles per-radio, per-agency metadata).
 class KeyContainerManager {
 public:
-  bool begin();              // init storage / crypto
-  void loop();               // background tasks
+    KeyContainerManager() = default;
 
-  bool loadContainers();     // scan SPIFFS/SD
-  bool addContainer(const KeyContainer& kc);
-  size_t getContainerCount() const;
-  const KeyContainer* getContainer(size_t index) const;
+    // Mount LittleFS and enumerate *.kfc containers.
+    bool begin();
 
-  bool getSecureMode() const { return _secureMode; }
-  void setSecureMode(bool enabled);
+    // Reloads the in-memory list of containers from LittleFS.
+    bool loadContainers();
+
+    // Number of loaded containers.
+    size_t getCount() const;
+
+    // Read-only access to a container by index.
+    const KeyContainer* getContainer(size_t idx) const;
+
+    // Simple load/save helpers for a specific file.
+    bool loadFromFile(const char* path,
+                      const std::string& passphrase,
+                      KeyContainer& out);
+
+    bool saveToFile(const char* path,
+                    const std::string& passphrase,
+                    const KeyContainer& in);
+
+    // Future use for periodic tasks (e.g., secure erase scheduling).
+    void loop();
 
 private:
-  bool _secureMode = true;   // secure by default
-  std::vector<KeyContainer> _containers;
+    // AES-256-CBC encryption/decryption.
+    bool aes256Encrypt(const std::vector<uint8_t>& plaintext,
+                       const std::vector<uint8_t>& key,
+                       std::vector<uint8_t>& iv,
+                       std::vector<uint8_t>& ciphertext);
 
-  bool loadFromFile(const char* path, const std::string& passphrase, KeyContainer& out);
-  bool saveToFile(const char* path, const std::string& passphrase, const KeyContainer& in);
+    bool aes256Decrypt(const std::vector<uint8_t>& ciphertext,
+                       const std::vector<uint8_t>& key,
+                       const std::vector<uint8_t>& iv,
+                       std::vector<uint8_t>& plaintext);
 
-  bool aes256Encrypt(const std::vector<uint8_t>& plaintext,
-                     const std::vector<uint8_t>& key,
-                     std::vector<uint8_t>& iv,
-                     std::vector<uint8_t>& ciphertext);
+    // Simple SHA-256–based key derivation (not full PBKDF2, but sufficient
+    // for this embedded demo; can be upgraded later).
+    std::vector<uint8_t> deriveKeyFromPass(const std::string& passphrase);
 
-  bool aes256Decrypt(const std::vector<uint8_t>& ciphertext,
-                     const std::vector<uint8_t>& key,
-                     const std::vector<uint8_t>& iv,
-                     std::vector<uint8_t>& plaintext);
-
-  std::vector<uint8_t> deriveKeyFromPass(const std::string& passphrase);
+    std::vector<KeyContainer> _containers;
 };

@@ -2,7 +2,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 
 using std::string;
 
@@ -16,18 +16,20 @@ ContainerModel& ContainerModel::instance() {
 
 ContainerModel::ContainerModel()
     : active_index_(-1),
-      storageReady_(false) {
+      storageReady_(false)
+{
+    containers_.clear();
 }
 
 // -------------------------------------------------------
-// Defaults (demo data if nothing is on SPIFFS)
+// Defaults
 // -------------------------------------------------------
 
 void ContainerModel::loadDefaults() {
     containers_.clear();
     active_index_ = -1;
 
-    // Example default container(s) – safe demo values only
+    // Example default container(s) – demo values only
     KeyContainer c1;
     c1.label  = "DEMO - AES256 Patrol";
     c1.agency = "Demo Agency";
@@ -45,7 +47,7 @@ void ContainerModel::loadDefaults() {
     KeySlot k2;
     k2.label    = "TG 2 - TAC";
     k2.algo     = "AES256";
-    k2.hex      = "FFEEDDCCBBAA99887766554433221100";
+    k2.hex      = "0123456789ABCDEF0123456789ABCDEF";
     k2.selected = false;
     c1.keys.push_back(k2);
 
@@ -57,14 +59,14 @@ void ContainerModel::loadDefaults() {
 }
 
 // -------------------------------------------------------
-// Storage helpers (SPIFFS only)
+// Storage helpers (LittleFS)
 // -------------------------------------------------------
 
 bool ContainerModel::ensureStorage() {
     if (storageReady_) return true;
 
-    if (!SPIFFS.begin(true)) { // formatOnFail = true
-        Serial.println("[ContainerModel] SPIFFS.begin() failed");
+    if (!LittleFS.begin(true)) { // formatOnFail = true
+        Serial.println("[ContainerModel] LittleFS.begin() failed");
         return false;
     }
 
@@ -72,147 +74,147 @@ bool ContainerModel::ensureStorage() {
     return true;
 }
 
-// Simple line-based format:
+// Simple text format:
 //
-//   KFDv1 <active_index> <container_count>
+//   KFDv1 <active_index> <container_count>   (header)
 //   C <label>
 //   A <agency>
 //   B <band>
 //   G <algo>
 //   L <0/1 locked>
-//   N <key_count>
-//   (for each key)
-//     K <label>
-//     g <algo>
-//     H <hex>
-//     S <0/1 selected>
+//   K <slot_label>|<algo>|<hex>|<selected 0/1>
+//   K ...
+//   C <label>           (next container)
+//   ...
 //
-// No newlines in any text fields.
+// We do not strictly rely on <container_count>; we parse until EOF.
 //
 
 bool ContainerModel::loadFromSPIFFS() {
-    containers_.clear();
-    active_index_ = -1;
-
     if (!ensureStorage()) {
         Serial.println("[ContainerModel] loadFromSPIFFS(): storage not ready");
         return false;
     }
 
-    if (!SPIFFS.exists(KFD_CONTAINER_FILE)) {
+    if (!LittleFS.exists(KFD_CONTAINER_FILE)) {
         Serial.println("[ContainerModel] no containers file; using defaults");
         loadDefaults();
+        // Persist defaults so next boot sees a file
+        saveToSPIFFS();
         return true;
     }
 
-    File f = SPIFFS.open(KFD_CONTAINER_FILE, FILE_READ);
+    File f = LittleFS.open(KFD_CONTAINER_FILE, FILE_READ);
     if (!f) {
         Serial.println("[ContainerModel] open for read failed; using defaults");
         loadDefaults();
         return false;
     }
 
+    // --- header ---
     String line = f.readStringUntil('\n');
     line.trim();
     if (!line.startsWith("KFDv1")) {
         Serial.println("[ContainerModel] invalid header signature; using defaults");
         f.close();
         loadDefaults();
+        saveToSPIFFS();
         return false;
     }
 
-    int headerActiveIdx = -1;
-    int containerCount  = 0;
-    if (sscanf(line.c_str(), "KFDv1 %d %d", &headerActiveIdx, &containerCount) != 2) {
-        Serial.println("[ContainerModel] header parse failed; using defaults");
-        f.close();
-        loadDefaults();
-        return false;
-    }
-
-    for (int i = 0; i < containerCount; ++i) {
-        if (!f.available()) break;
-
-        KeyContainer kc;
-
-        // C <label>
-        line = f.readStringUntil('\n'); line.trim();
-        if (!line.startsWith("C ")) break;
-        kc.label = string(line.c_str() + 2);
-
-        // A <agency>
-        line = f.readStringUntil('\n'); line.trim();
-        if (!line.startsWith("A ")) break;
-        kc.agency = string(line.c_str() + 2);
-
-        // B <band>
-        line = f.readStringUntil('\n'); line.trim();
-        if (!line.startsWith("B ")) break;
-        kc.band = string(line.c_str() + 2);
-
-        // G <algo>
-        line = f.readStringUntil('\n'); line.trim();
-        if (!line.startsWith("G ")) break;
-        kc.algo = string(line.c_str() + 2);
-
-        // L <0/1 locked>
-        line = f.readStringUntil('\n'); line.trim();
-        int lockedInt = 0;
-        if (sscanf(line.c_str(), "L %d", &lockedInt) != 1) break;
-        kc.locked = (lockedInt != 0);
-
-        // N <key_count>
-        line = f.readStringUntil('\n'); line.trim();
-        int keyCount = 0;
-        if (sscanf(line.c_str(), "N %d", &keyCount) != 1) break;
-
-        kc.keys.clear();
-        for (int k = 0; k < keyCount; ++k) {
-            if (!f.available()) break;
-
-            KeySlot ks;
-
-            // K <label>
-            line = f.readStringUntil('\n'); line.trim();
-            if (!line.startsWith("K ")) break;
-            ks.label = string(line.c_str() + 2);
-
-            // g <algo>
-            line = f.readStringUntil('\n'); line.trim();
-            if (!line.startsWith("g ")) break;
-            ks.algo = string(line.c_str() + 2);
-
-            // H <hex>
-            line = f.readStringUntil('\n'); line.trim();
-            if (!line.startsWith("H ")) break;
-            ks.hex = string(line.c_str() + 2);
-
-            // S <0/1 selected>
-            line = f.readStringUntil('\n'); line.trim();
-            int selInt = 0;
-            if (sscanf(line.c_str(), "S %d", &selInt) != 1) break;
-            ks.selected = (selInt != 0);
-
-            kc.keys.push_back(ks);
+    int activeIdx = -1;
+    int declaredCount = 0;
+    {
+        int space1 = line.indexOf(' ');
+        int space2 = line.indexOf(' ', space1 + 1);
+        if (space1 >= 0 && space2 > space1) {
+            activeIdx     = line.substring(space1 + 1, space2).toInt();
+            declaredCount = line.substring(space2 + 1).toInt();
         }
+    }
 
-        containers_.push_back(kc);
+    containers_.clear();
+    active_index_ = -1;
+
+    KeyContainer current;
+    bool inContainer = false;
+
+    while (f.available()) {
+        String l = f.readStringUntil('\n');
+        l.trim();
+        if (!l.length()) continue;
+
+        char type = l.charAt(0);
+
+        if (type == 'C') {
+            // Start of new container
+            if (inContainer) {
+                containers_.push_back(current);
+            }
+            current = KeyContainer();
+            inContainer = true;
+            current.label = l.substring(2).c_str();
+        } else if (!inContainer) {
+            // Ignore other lines until first 'C'
+            continue;
+        } else if (type == 'A') {
+            current.agency = l.substring(2).c_str();
+        } else if (type == 'B') {
+            current.band = l.substring(2).c_str();
+        } else if (type == 'G') {
+            current.algo = l.substring(2).c_str();
+        } else if (type == 'L') {
+            current.locked = (l.substring(2).toInt() != 0);
+        } else if (type == 'K') {
+            String rest = l.substring(2);
+            // label|algo|hex|selected
+            String parts[4];
+            int partIdx = 0;
+
+            int start = 0;
+            while (partIdx < 4) {
+                int p = rest.indexOf('|', start);
+                if (p < 0) {
+                    parts[partIdx++] = rest.substring(start);
+                    break;
+                } else {
+                    parts[partIdx++] = rest.substring(start, p);
+                    start = p + 1;
+                }
+            }
+
+            KeySlot slot;
+            if (partIdx > 0) slot.label = parts[0].c_str();
+            if (partIdx > 1) slot.algo  = parts[1].c_str();
+            if (partIdx > 2) slot.hex   = parts[2].c_str();
+            if (partIdx > 3) slot.selected = (parts[3].toInt() != 0);
+            else             slot.selected = false;
+
+            current.keys.push_back(slot);
+        }
+    }
+
+    if (inContainer) {
+        containers_.push_back(current);
     }
 
     f.close();
 
-    if (!containers_.empty()) {
-        if (headerActiveIdx >= 0 && headerActiveIdx < (int)containers_.size()) {
-            active_index_ = headerActiveIdx;
-        } else {
-            active_index_ = 0;
-        }
-    } else {
-        active_index_ = -1;
+    if (containers_.empty()) {
+        Serial.println("[ContainerModel] parsed zero containers; using defaults");
+        loadDefaults();
+        saveToSPIFFS();
+        return true;
     }
 
-    Serial.printf("[ContainerModel] Loaded %u containers from SPIFFS (active=%d)\n",
-                  (unsigned)containers_.size(), active_index_);
+    if (activeIdx < 0 || activeIdx >= (int)containers_.size()) {
+        active_index_ = 0;
+    } else {
+        active_index_ = activeIdx;
+    }
+
+    Serial.printf("[ContainerModel] Loaded %u containers from LittleFS (active=%d, declared=%d)\n",
+                  (unsigned)containers_.size(), active_index_, declaredCount);
     return true;
 }
 
@@ -222,7 +224,7 @@ bool ContainerModel::saveToSPIFFS() {
         return false;
     }
 
-    File f = SPIFFS.open(KFD_CONTAINER_FILE, FILE_WRITE);
+    File f = LittleFS.open(KFD_CONTAINER_FILE, FILE_WRITE);
     if (!f) {
         Serial.println("[ContainerModel] open for write failed");
         return false;
@@ -230,159 +232,38 @@ bool ContainerModel::saveToSPIFFS() {
 
     int activeIdx = active_index_;
     if (activeIdx < 0 || activeIdx >= (int)containers_.size()) {
-        activeIdx = -1;
+        activeIdx = (containers_.empty() ? -1 : 0);
     }
 
     // Header
     f.printf("KFDv1 %d %u\n", activeIdx, (unsigned)containers_.size());
 
     // Containers
-    for (const auto& kc : containers_) {
-        f.print("C ");
-        f.println(kc.label.c_str());
+    for (const auto& c : containers_) {
+        f.printf("C %s\n", c.label.c_str());
+        f.printf("A %s\n", c.agency.c_str());
+        f.printf("B %s\n", c.band.c_str());
+        f.printf("G %s\n", c.algo.c_str());
+        f.printf("L %d\n", c.locked ? 1 : 0);
 
-        f.print("A ");
-        f.println(kc.agency.c_str());
-
-        f.print("B ");
-        f.println(kc.band.c_str());
-
-        f.print("G ");
-        f.println(kc.algo.c_str());
-
-        f.printf("L %d\n", kc.locked ? 1 : 0);
-
-        f.printf("N %u\n", (unsigned)kc.keys.size());
-        for (const auto& ks : kc.keys) {
-            f.print("K ");
-            f.println(ks.label.c_str());
-
-            f.print("g ");
-            f.println(ks.algo.c_str());
-
-            f.print("H ");
-            f.println(ks.hex.c_str());
-
-            f.printf("S %d\n", ks.selected ? 1 : 0);
+        for (const auto& ks : c.keys) {
+            f.printf("K %s|%s|%s|%d\n",
+                     ks.label.c_str(),
+                     ks.algo.c_str(),
+                     ks.hex.c_str(),
+                     ks.selected ? 1 : 0);
         }
     }
 
     f.close();
-    Serial.printf("[ContainerModel] Saved %u containers to SPIFFS\n",
-                  (unsigned)containers_.size());
+    Serial.printf("[ContainerModel] Saved %u containers to LittleFS (active=%d)\n",
+                  (unsigned)containers_.size(), activeIdx);
     return true;
 }
 
 // -------------------------------------------------------
 // Public API
 // -------------------------------------------------------
-
-size_t ContainerModel::getCount() const {
-    return containers_.size();
-}
-
-const KeyContainer& ContainerModel::get(size_t idx) const {
-    static KeyContainer empty;
-    if (idx >= containers_.size()) return empty;
-    return containers_[idx];
-}
-
-KeyContainer& ContainerModel::getMutable(size_t idx) {
-    // caller is expected to bounds-check; still guard
-    if (idx >= containers_.size()) {
-        // fallback: last element if out-of-range
-        return containers_.back();
-    }
-    return containers_[idx];
-}
-
-int ContainerModel::getActiveIndex() const {
-    return active_index_;
-}
-
-const KeyContainer* ContainerModel::getActive() const {
-    if (active_index_ < 0 || (size_t)active_index_ >= containers_.size()) {
-        return nullptr;
-    }
-    return &containers_[active_index_];
-}
-
-void ContainerModel::setActiveIndex(int idx) {
-    if (idx < 0 || (size_t)idx >= containers_.size()) {
-        active_index_ = -1;
-    } else {
-        active_index_ = idx;
-    }
-    // Persist active index as part of the model
-    save();
-}
-
-// ----- container CRUD -----
-
-int ContainerModel::addContainer(const KeyContainer& kc) {
-    containers_.push_back(kc);
-    int idx = (int)containers_.size() - 1;
-
-    if (active_index_ < 0) {
-        active_index_ = idx;
-    }
-
-    save();
-    return idx;
-}
-
-bool ContainerModel::updateContainer(size_t idx, const KeyContainer& kc) {
-    if (idx >= containers_.size()) return false;
-    containers_[idx] = kc;
-    save();
-    return true;
-}
-
-bool ContainerModel::removeContainer(size_t idx) {
-    if (idx >= containers_.size()) return false;
-
-    containers_.erase(containers_.begin() + idx);
-
-    if (containers_.empty()) {
-        active_index_ = -1;
-    } else if (active_index_ >= (int)containers_.size()) {
-        active_index_ = (int)containers_.size() - 1;
-    }
-
-    save();
-    return true;
-}
-
-// ----- key CRUD -----
-
-int ContainerModel::addKey(size_t containerIdx, const KeySlot& key) {
-    if (containerIdx >= containers_.size()) return -1;
-    KeyContainer& kc = containers_[containerIdx];
-    kc.keys.push_back(key);
-    int idx = (int)kc.keys.size() - 1;
-    save();
-    return idx;
-}
-
-bool ContainerModel::updateKey(size_t containerIdx, size_t keyIdx, const KeySlot& key) {
-    if (containerIdx >= containers_.size()) return false;
-    KeyContainer& kc = containers_[containerIdx];
-    if (keyIdx >= kc.keys.size()) return false;
-    kc.keys[keyIdx] = key;
-    save();
-    return true;
-}
-
-bool ContainerModel::removeKey(size_t containerIdx, size_t keyIdx) {
-    if (containerIdx >= containers_.size()) return false;
-    KeyContainer& kc = containers_[containerIdx];
-    if (keyIdx >= kc.keys.size()) return false;
-    kc.keys.erase(kc.keys.begin() + keyIdx);
-    save();
-    return true;
-}
-
-// ----- persistence entrypoints -----
 
 bool ContainerModel::load() {
     if (!ensureStorage()) {
@@ -400,11 +281,163 @@ bool ContainerModel::load() {
 }
 
 bool ContainerModel::save() {
-    // TEMP: disable actual SPIFFS writes while we stabilize UI/touch.
-    // All containers/keys will live in RAM only for this session.
-    Serial.printf("[ContainerModel] save() stub (no SPIFFS write) - %u containers\n",
+    if (!saveToSPIFFS()) {
+        Serial.printf("[ContainerModel] save() failed; RAM-only state (%u containers)\n",
+                      (unsigned)containers_.size());
+        return false;
+    }
+
+    Serial.printf("[ContainerModel] save() OK (%u containers)\n",
                   (unsigned)containers_.size());
     return true;
 }
 
+bool ContainerModel::factoryReset() {
+    Serial.println("[ContainerModel] FACTORY RESET requested");
 
+    if (!ensureStorage()) {
+        Serial.println("[ContainerModel] factoryReset(): storage not ready");
+        return false;
+    }
+
+    // Erase the whole LittleFS filesystem
+    if (!LittleFS.format()) {
+        Serial.println("[ContainerModel] factoryReset(): LittleFS.format() failed");
+        return false;
+    }
+
+    // Force re-mount after format
+    storageReady_ = false;
+    if (!ensureStorage()) {
+        Serial.println("[ContainerModel] factoryReset(): remount after format failed");
+        return false;
+    }
+
+    // Rebuild defaults and persist them
+    loadDefaults();
+    if (!saveToSPIFFS()) {
+        Serial.println("[ContainerModel] factoryReset(): save defaults failed");
+        return false;
+    }
+
+    Serial.println("[ContainerModel] FACTORY RESET complete (defaults written)");
+    return true;
+}
+
+// ----- CRUD -----
+
+size_t ContainerModel::getCount() const {
+    return containers_.size();
+}
+
+// Old-style API used by ui.cpp
+const KeyContainer& ContainerModel::get(size_t idx) const {
+    // Caller already bounds-checks in ui.cpp; but clamp for safety.
+    if (idx >= containers_.size()) {
+        static KeyContainer dummy;
+        return dummy;
+    }
+    return containers_[idx];
+}
+
+KeyContainer& ContainerModel::getMutable(size_t idx) {
+    if (idx >= containers_.size()) {
+        static KeyContainer dummy;
+        return dummy;
+    }
+    return containers_[idx];
+}
+
+// Pointer-style API
+const KeyContainer* ContainerModel::getContainer(size_t idx) const {
+    if (idx >= containers_.size()) return nullptr;
+    return &containers_[idx];
+}
+
+KeyContainer* ContainerModel::getContainer(size_t idx) {
+    if (idx >= containers_.size()) return nullptr;
+    return &containers_[idx];
+}
+
+// Active selection
+
+int ContainerModel::getActiveIndex() const {
+    return active_index_;
+}
+
+bool ContainerModel::setActiveIndex(int idx) {
+    if (idx < 0 || idx >= (int)containers_.size()) {
+        return false;
+    }
+    active_index_ = idx;
+    return true;
+}
+
+const KeyContainer* ContainerModel::getActive() const {
+    if (active_index_ < 0 || active_index_ >= (int)containers_.size()) {
+        return nullptr;
+    }
+    return &containers_[active_index_];
+}
+
+bool ContainerModel::addContainer(const KeyContainer& c) {
+    containers_.push_back(c);
+    if (active_index_ < 0) {
+        active_index_ = 0;
+    }
+    return save();
+}
+
+bool ContainerModel::updateContainer(size_t idx, const KeyContainer& c) {
+    if (idx >= containers_.size()) return false;
+    containers_[idx] = c;
+    return save();
+}
+
+bool ContainerModel::deleteContainer(size_t idx) {
+    if (idx >= containers_.size()) return false;
+    containers_.erase(containers_.begin() + idx);
+    if (containers_.empty()) {
+        active_index_ = -1;
+    } else if (active_index_ >= (int)containers_.size()) {
+        active_index_ = (int)containers_.size() - 1;
+    }
+    return save();
+}
+
+bool ContainerModel::moveContainer(size_t fromIdx, size_t toIdx) {
+    if (fromIdx >= containers_.size() || toIdx >= containers_.size()) {
+        return false;
+    }
+    if (fromIdx == toIdx) return true;
+
+    auto tmp = containers_[fromIdx];
+    containers_.erase(containers_.begin() + fromIdx);
+    containers_.insert(containers_.begin() + toIdx, tmp);
+
+    if (active_index_ == (int)fromIdx) {
+        active_index_ = (int)toIdx;
+    } else if (active_index_ > (int)fromIdx && active_index_ <= (int)toIdx) {
+        active_index_--;
+    } else if (active_index_ < (int)fromIdx && active_index_ >= (int)toIdx) {
+        active_index_++;
+    }
+
+    return save();
+}
+
+// Per-key operations used by ui.cpp
+
+bool ContainerModel::addKey(size_t containerIdx, const KeySlot& slot) {
+    if (containerIdx >= containers_.size()) return false;
+    containers_[containerIdx].keys.push_back(slot);
+    return save();
+}
+
+bool ContainerModel::updateKey(size_t containerIdx, size_t keyIdx, const KeySlot& slot) {
+    if (containerIdx >= containers_.size()) return false;
+    auto& kc = containers_[containerIdx];
+    if (keyIdx >= kc.keys.size()) return false;
+    kc.keys[keyIdx] = slot;
+    return save();
+}

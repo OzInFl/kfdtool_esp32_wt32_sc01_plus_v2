@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "container_model.h"
+
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include <lvgl.h>
@@ -17,9 +18,13 @@ public:
   lgfx::Touch_FT5x06   _touch_instance;
 
   LGFX(void) {
-    { // 8-bit parallel bus config
+    // 8-bit parallel bus config
+    {
       auto cfg = _bus_instance.config();
-      cfg.freq_write = 20000000;
+
+      // ESP32-S3 WT32-SC01-PLUS uses I2S0 (port 0) for 8-bit parallel
+      cfg.port       = 0;
+      cfg.freq_write = 40000000;   // 40 MHz is fine for this panel
 
       cfg.pin_wr = 47;
       cfg.pin_rd = -1;
@@ -39,28 +44,38 @@ public:
       _panel_instance.setBus(&_bus_instance);
     }
 
-    { // panel config
+    // Panel config
+    {
       auto cfg = _panel_instance.config();
       cfg.pin_cs           = -1;
       cfg.pin_rst          = 4;
       cfg.pin_busy         = -1;
+
+      // Panel & memory geometry: 320x480 portrait
+      cfg.memory_width     = 320;
+      cfg.memory_height    = 480;
       cfg.panel_width      = 320;
       cfg.panel_height     = 480;
       cfg.offset_x         = 0;
       cfg.offset_y         = 0;
       cfg.offset_rotation  = 0;
+
       cfg.dummy_read_pixel = 8;
       cfg.dummy_read_bits  = 1;
       cfg.readable         = true;
-      cfg.invert           = true;
-      cfg.rgb_order        = false;
-      cfg.dlen_16bit       = false;
-      cfg.bus_shared       = true;
+
+      // Color tuning
+      cfg.invert           = true;   // start with non-inverted
+      cfg.rgb_order        = false;    // ST7796 on this board is BGR
+
+      cfg.dlen_16bit       = false;   // 8-bit parallel
+      cfg.bus_shared       = false;   // panel has its own bus
 
       _panel_instance.config(cfg);
     }
 
-    { // backlight
+    // Backlight
+    {
       auto cfg = _light_instance.config();
       cfg.pin_bl      = 45;
       cfg.invert      = false;
@@ -71,23 +86,23 @@ public:
       _panel_instance.setLight(&_light_instance);
     }
 
-    { // touch (FT5x06 / FT6336U)
+    // Touch (FT5x06 / FT6336U)
+    {
       auto cfg = _touch_instance.config();
-      cfg.x_min      = 0;
-      cfg.x_max      = 319;
-      cfg.y_min      = 0;
-      cfg.y_max      = 479;
+      cfg.x_min          = 0;
+      cfg.x_max          = 319;
+      cfg.y_min          = 0;
+      cfg.y_max          = 479;
 
-      // Poll I2C, ignore INT pin
-      cfg.pin_int    = -1;
-      cfg.bus_shared = true;
+      cfg.pin_int        = -1;     // we poll I2C
+      cfg.bus_shared     = false;  // separate I2C bus
       cfg.offset_rotation = 0;
 
       cfg.i2c_port = 1;
       cfg.i2c_addr = 0x38;
       cfg.pin_sda  = 6;
       cfg.pin_scl  = 5;
-      cfg.freq     = 100000;   // 100 kHz
+      cfg.freq     = 400000;      // 400 kHz I2C
 
       _touch_instance.config(cfg);
       _panel_instance.setTouch(&_touch_instance);
@@ -104,37 +119,55 @@ static LGFX lcd;
 // ------------------------------------------------------------------
 
 static lv_disp_draw_buf_t draw_buf;
-static lv_color_t lv_buf1[320 * 40];
+static lv_color_t         lv_buf1[320 * 40];
 
-// Flush callback: LVGL -> LovyanGFX
-static void lvgl_flush_cb(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
-  (void)disp;
-  int32_t w = (area->x2 - area->x1 + 1);
-  int32_t h = (area->y2 - area->y1 + 1);
+static void lvgl_flush_cb(lv_disp_drv_t* disp,
+                          const lv_area_t* area,
+                          lv_color_t* color_p) {
+  int32_t x1 = area->x1;
+  int32_t y1 = area->y1;
+  int32_t w  = area->x2 - area->x1 + 1;
+  int32_t h  = area->y2 - area->y1 + 1;
+
+  if (w <= 0 || h <= 0) {
+    lv_disp_flush_ready(disp);
+    return;
+  }
 
   lcd.startWrite();
-  lcd.setAddrWindow(area->x1, area->y1, w, h);
-  lcd.pushPixels((lgfx::rgb565_t*)&color_p->full, w * h);
-  lcd.endWrite();
+  lcd.setAddrWindow(x1, y1, w, h);
 
+  // LV_COLOR_DEPTH must be 16 for this direct cast to be valid.
+  lcd.pushPixels((lgfx::rgb565_t*)&color_p->full, w * h);
+
+  lcd.endWrite();
   lv_disp_flush_ready(disp);
 }
 
-// Touch callback: LovyanGFX -> LVGL
-static void lvgl_touch_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
-  (void)indev_driver;
-  static bool last_pressed = false;
-  uint16_t tx, ty;
+static bool    last_pressed = false;
+static int16_t last_x = 0;
+static int16_t last_y = 0;
 
-  if (lcd.getTouch(&tx, &ty)) {
-    data->state = LV_INDEV_STATE_PRESSED;
+static void lvgl_touch_read(lv_indev_drv_t* indev_drv, lv_indev_data_t* data) {
+  (void)indev_drv;
+
+  uint16_t x, y;
+  bool pressed = lcd.getTouch(&x, &y);
+
+  if (pressed) {
+    int16_t tx = x;
+    int16_t ty = y;
+
+    data->state   = LV_INDEV_STATE_PRESSED;
     data->point.x = tx;
     data->point.y = ty;
 
-    if (!last_pressed) {
-      Serial.printf("LVGL touch DOWN: (%u, %u)\n", tx, ty);
+    if (!last_pressed || tx != last_x || ty != last_y) {
+      Serial.printf("LVGL touch DOWN: (%d, %d)\n", tx, ty);
+      last_x = tx;
+      last_y = ty;
+      last_pressed = true;
     }
-    last_pressed = true;
   } else {
     if (last_pressed) {
       Serial.println("LVGL touch UP");
@@ -151,15 +184,15 @@ static void setup_lvgl() {
 
   static lv_disp_drv_t disp_drv;
   lv_disp_drv_init(&disp_drv);
-  disp_drv.hor_res = 320;
-  disp_drv.ver_res = 480;
+  disp_drv.hor_res  = 320;
+  disp_drv.ver_res  = 480;
   disp_drv.flush_cb = lvgl_flush_cb;
   disp_drv.draw_buf = &draw_buf;
   lv_disp_drv_register(&disp_drv);
 
   static lv_indev_drv_t indev_drv;
   lv_indev_drv_init(&indev_drv);
-  indev_drv.type = LV_INDEV_TYPE_POINTER;
+  indev_drv.type    = LV_INDEV_TYPE_POINTER;
   indev_drv.read_cb = lvgl_touch_read;
   lv_indev_drv_register(&indev_drv);
 }
@@ -171,35 +204,35 @@ static void setup_lvgl() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("Keyloader UI boot (LVGL, stable keepalive)...");
+  Serial.println("Keyloader UI boot (LVGL, LittleFS, persistence)...");
 
   lcd.init();
-  lcd.setRotation(0);       // portrait
-  lcd.setBrightness(255);
-  lcd.fillScreen(0x0000);
+  lcd.setColorDepth(16);  // make sure LGFX is in 16-bit mode
+  lcd.setRotation(0);     // portrait: 320x480
+  lcd.setBrightness(200);
 
   setup_lvgl();
 
-  // Mount storage + load containers from SPIFFS/SD (or defaults)
-    ContainerModel::instance().load();
+  // Mount storage + load containers from LittleFS (or defaults)
+  ContainerModel& model = ContainerModel::instance();
+  model.loadDefaults();  // safe defaults first
+  model.load();          // try to override from persistent storage
 
-  // Build Motorola-style UI (roles + containers)
   ui_init();
 }
 
 void loop() {
-  // LVGL core
   lv_timer_handler();
 
-  // --- Touch keepalive: poll controller directly too ---
+  // simple timing / debouncing
+  static uint32_t last = millis();
+  uint32_t now = millis();
+  if (now - last > 5) {
+    last = now;
+  }
+
   static int32_t x, y;
   if (lcd.getTouch(&x, &y)) {
-    // Optional: comment out fillRect if you don't want dots:
-    // lcd.fillRect(x - 1, y - 1, 3, 3, 0xFFFF);
-
-    // Optional: comment out logs if too noisy:
-    // Serial.printf("RAW keepalive touch: (%d, %d)\n", x, y);
-
     delay(50);
   } else {
     delay(5);

@@ -29,6 +29,8 @@ static const char* current_user_name = "NONE";
 static const char* PIN_ADMIN    = "5000";
 static const char* PIN_OPERATOR = "1111";
 
+static lv_obj_t* factory_reset_mbox     = nullptr;
+
 // ----------------------
 // Screens
 // ----------------------
@@ -94,6 +96,8 @@ static void build_key_edit_screen(int container_index, int key_index);
 static void show_home_screen(lv_event_t* e);
 static void show_containers_screen(lv_event_t* e);
 static void event_btn_keys(lv_event_t* e);
+static void event_btn_factory_reset(lv_event_t* e);
+static void event_factory_reset_confirm(lv_event_t* e);
 static void event_btn_keyload(lv_event_t* e);
 static void event_btn_settings(lv_event_t* e);
 static void event_btn_user_manager(lv_event_t* e);
@@ -579,6 +583,77 @@ static void event_set_active_container(lv_event_t* e) {
     }
     update_keyload_container_label();
 }
+
+// Factory reset: show confirmation dialog
+static void event_btn_factory_reset(lv_event_t* e) {
+    (void)e;
+
+    // If you have an admin/auth check helper, call it here.
+    // Example:
+    // if (!check_access(true, "FACTORY RESET")) {
+    //     return;
+    // }
+
+    if (factory_reset_mbox) {
+        lv_obj_del(factory_reset_mbox);
+        factory_reset_mbox = nullptr;
+    }
+
+    static const char* btns[] = { "ERASE ALL", "CANCEL", nullptr };
+
+    factory_reset_mbox = lv_msgbox_create(
+        NULL,
+        "FACTORY RESET",
+        "This will ERASE all containers/keys stored internally.\n"
+        "You cannot undo this.\n\nProceed?",
+        btns,
+        false
+    );
+    lv_obj_center(factory_reset_mbox);
+    lv_obj_add_event_cb(factory_reset_mbox,
+                        event_factory_reset_confirm,
+                        LV_EVENT_VALUE_CHANGED,
+                        NULL);
+}
+
+// Factory reset confirmation handler
+static void event_factory_reset_confirm(lv_event_t* e) {
+    (void)e;
+    if (!factory_reset_mbox) return;
+
+    const char* btn_txt = lv_msgbox_get_active_btn_text(factory_reset_mbox);
+
+    lv_obj_del(factory_reset_mbox);
+    factory_reset_mbox = nullptr;
+
+    if (!btn_txt) {
+        return;
+    }
+
+    if (strcmp(btn_txt, "ERASE ALL") != 0) {
+        if (status_label) {
+            lv_label_set_text(status_label, "FACTORY RESET CANCELED");
+        }
+        return;
+    }
+
+    ContainerModel& model = ContainerModel::instance();
+    if (!model.factoryReset()) {
+        if (status_label) {
+            lv_label_set_text(status_label, "FACTORY RESET FAILED");
+        }
+        return;
+    }
+
+    if (status_label) {
+        lv_label_set_text(status_label, "FACTORY RESET COMPLETE");
+    }
+
+    // If you have a function to rebuild the containers list, call it here.
+    // Example:
+    // rebuild_containers_list();
+}
+
 
 static void event_delete_container_confirm(lv_event_t* e) {
     (void)e;
@@ -1196,6 +1271,17 @@ static void build_settings_screen(void) {
     lv_checkbox_set_text(cb_audit, "Enable audit log to SD");
     lv_obj_set_style_text_color(cb_audit, lv_color_hex(0xC8F4FF), 0);
     lv_obj_align(cb_audit, LV_ALIGN_TOP_LEFT, 20, 140);
+
+    // Factory reset button (admin-only)
+    lv_obj_t* btn_factory = lv_btn_create(settings_screen);
+    lv_obj_set_size(btn_factory, 260, 50);
+    lv_obj_align(btn_factory, LV_ALIGN_BOTTOM_MID, 0, -20);
+    style_moto_tile_button(btn_factory); // or whatever button style helper you already use
+    lv_obj_add_event_cb(btn_factory, event_btn_factory_reset, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl_factory = lv_label_create(btn_factory);
+    lv_label_set_text(lbl_factory, "FACTORY RESET (ERASE)");
+    lv_obj_center(lbl_factory);
 }
 
 // ----------------------
