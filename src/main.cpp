@@ -142,6 +142,7 @@ static void lvgl_flush_cb(lv_disp_drv_t* disp,
 
   lcd.endWrite();
   lv_disp_flush_ready(disp);
+  
 }
 
 static bool    last_pressed = false;
@@ -224,21 +225,23 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
-  // No autosave; persistence only via explicit Save Now / Factory Reset
+  // Periodic container autosave (deferred, light)
+  ContainerModel::instance().service();
 
   // simple timing / debouncing
   static uint32_t last = millis();
   uint32_t now = millis();
   if (now - last > 5) {
-      last = now;
+    last = now;
   }
 
   static int32_t x, y;
   if (lcd.getTouch(&x, &y)) {
-      delay(50);
+    delay(50);
   } else {
-      delay(5);
+    delay(5);
   }
 }
+
 
 

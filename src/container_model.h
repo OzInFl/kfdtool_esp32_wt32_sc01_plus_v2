@@ -4,7 +4,7 @@
 #include <string>
 #include <stdint.h>
 
-// One key entry inside a UI-level container (what the user edits on-screen).
+// UI-level key slot inside a container.
 struct KeySlot {
     std::string label;     // e.g. "TG 1 - Patrol"
     std::string algo;      // e.g. "AES256"
@@ -12,10 +12,10 @@ struct KeySlot {
     bool        selected;  // whether to include in keyload
 };
 
-// A logical key container (like a KVL "keyset") as seen by the UI.
+// UI-level key container (what the operator sees/edits).
 struct KeyContainer {
     std::string label;     // user-facing name
-    std::string agency;    // "Plantation FD", etc.
+    std::string agency;    // "Plantation FD"
     std::string band;      // "700/800", "VHF", etc.
     std::string algo;      // "AES256", "ADP", "DES-OFB"
     bool        locked;    // true = container locked and cannot be edited
@@ -42,12 +42,10 @@ public:
     // Load from LittleFS; if file missing or invalid, build sane defaults.
     bool load();
 
-    // Called by mutating operations (add/update/delete). This is now
-    // NON-BLOCKING: it only marks state as "dirty" and records a timestamp.
+    // Non-blocking: mark state as dirty & remember change time.
     bool save();
 
-    // Explicit, blocking save that really writes to LittleFS immediately.
-    // Used by the "Save Now" button and by factory reset.
+    // Blocking: immediately write to LittleFS.
     bool saveNow();
 
     // Erase LittleFS and rebuild defaults, then save them.

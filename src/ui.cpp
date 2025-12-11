@@ -40,6 +40,8 @@ static lv_obj_t* keyload_screen       = nullptr;
 static lv_obj_t* settings_screen      = nullptr;
 static lv_obj_t* user_screen          = nullptr;
 
+
+
 // Container detail / key edit screens
 static lv_obj_t* container_detail_screen = nullptr;
 static lv_obj_t* key_edit_screen         = nullptr;
@@ -147,8 +149,8 @@ static void style_moto_tile_button(lv_obj_t* btn) {
 }
 
 static void style_moto_screen(lv_obj_t* scr) {
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000810), 0);
+    lv_obj_remove_style_all(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 }
 
@@ -911,7 +913,7 @@ static void build_key_edit_screen(int container_index, int key_index) {
     if (key_edit_screen) {
         lv_obj_del(key_edit_screen);
         key_edit_screen = nullptr;
-        
+
         keyedit_label_ta     = nullptr;
         keyedit_algo_dd      = nullptr;
         keyedit_key_ta       = nullptr;

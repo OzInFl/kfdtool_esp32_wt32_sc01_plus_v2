@@ -1,19 +1,31 @@
-#include "kfd_protocol.h"
 #include <Arduino.h>
+#include "kfd_protocol.h"
 
-// Pin definitions - adjust to your hardware wiring
-static const int PIN_TWI_DATA   = 4;
-static const int PIN_TWI_CLOCK  = 5;
-static const int PIN_TWI_ENABLE = 6;
+// -----------------------------------------------------------------------------
+// Pin assignments for the 3-wire interface – adjust to your hardware.
+// -----------------------------------------------------------------------------
+static constexpr int PIN_TWI_DATA = 21;
+static constexpr int PIN_TWI_CLK  = 22;
+static constexpr int PIN_TWI_EN   = 23;
+
+// -----------------------------------------------------------------------------
+// Low-level helpers (currently stubs / debug only)
+// -----------------------------------------------------------------------------
 
 bool KFDProtocol::begin() {
-  pinMode(PIN_TWI_DATA, OUTPUT_OPEN_DRAIN);
-  pinMode(PIN_TWI_CLOCK, OUTPUT_OPEN_DRAIN);
-  pinMode(PIN_TWI_ENABLE, OUTPUT);
+  // Configure GPIO as outputs; you can tune this to your real wiring.
+  pinMode(PIN_TWI_DATA, OUTPUT);
+  pinMode(PIN_TWI_CLK,  OUTPUT);
+  pinMode(PIN_TWI_EN,   OUTPUT);
 
-  twiSetEnable(false);
-  twiSetClock(true);
-  twiSetData(true);
+  digitalWrite(PIN_TWI_DATA, LOW);
+  digitalWrite(PIN_TWI_CLK,  LOW);
+  digitalWrite(PIN_TWI_EN,   LOW);
+
+  _state           = IDLE;
+  _currentKeyIndex = 0;
+
+  Serial.println("[KFD] begin(): interface initialised (stub)");
   return true;
 }
 
@@ -21,73 +33,119 @@ void KFDProtocol::loop() {
   stateMachine();
 }
 
-bool KFDProtocol::beginKeyload(const KeyContainer& kc) {
-  if (!kc.isValid()) return false;
-  if (_state != IDLE) return false;
+void KFDProtocol::twiSetData(bool level)   { digitalWrite(PIN_TWI_DATA, level ? HIGH : LOW); }
+void KFDProtocol::twiSetClock(bool level)  { digitalWrite(PIN_TWI_CLK,  level ? HIGH : LOW); }
+void KFDProtocol::twiSetEnable(bool level) { digitalWrite(PIN_TWI_EN,   level ? HIGH : LOW); }
+bool KFDProtocol::twiGetData()             { return digitalRead(PIN_TWI_DATA) != 0; }
 
-  _activeContainer = kc;
-  _currentKeyIndex = 0;
-  _state = SESSION_START;
-  return true;
-}
-
-void KFDProtocol::twiSetData(bool level) {
-  digitalWrite(PIN_TWI_DATA, level ? HIGH : LOW);
-}
-
-void KFDProtocol::twiSetClock(bool level) {
-  digitalWrite(PIN_TWI_CLOCK, level ? HIGH : LOW);
-}
-
-void KFDProtocol::twiSetEnable(bool level) {
-  digitalWrite(PIN_TWI_ENABLE, level ? HIGH : LOW);
-}
-
-bool KFDProtocol::twiGetData() {
-  pinMode(PIN_TWI_DATA, INPUT_PULLUP);
-  bool v = digitalRead(PIN_TWI_DATA);
-  pinMode(PIN_TWI_DATA, OUTPUT_OPEN_DRAIN);
-  return v;
-}
-
+// For now these are just stubs. When you’re ready to implement real
+// protocol timing, expand these.
 void KFDProtocol::sendBit(bool bit) {
-  twiSetData(bit);
-  delayMicroseconds(5);
-  twiSetClock(true);
-  delayMicroseconds(5);
-  twiSetClock(false);
+  (void)bit;
+  // TODO: implement real timing; for now just a debug placeholder.
+  // twiSetData(bit);
+  // delayMicroseconds(5);
+  // twiSetClock(true);
+  // delayMicroseconds(5);
+  // twiSetClock(false);
 }
 
 void KFDProtocol::sendByte(uint8_t value) {
   for (int i = 7; i >= 0; --i) {
-    sendBit((value >> i) & 1);
+    bool b = (value >> i) & 0x01;
+    sendBit(b);
   }
 }
 
 void KFDProtocol::sendFrame(const uint8_t* data, size_t len) {
-  // This is intentionally just a placeholder. The actual P25 KFD frame
-  // format must follow TIA-102.AACD-A and the implementation in KFDtool.
+  // Stub: in real implementation you would frame bytes with start/stop
+  // conditions and any header the radio expects. For now we just log.
+  Serial.print("[KFD] sendFrame: ");
   for (size_t i = 0; i < len; ++i) {
-    sendByte(data[i]);
+    Serial.printf("%02X", data[i]);
   }
+  Serial.println();
 }
 
 bool KFDProtocol::recvFrame(uint8_t* buf, size_t maxLen, size_t& outLen) {
-  // Placeholder: you would implement RX sampling and framing here.
+  (void)buf;
+  (void)maxLen;
   outLen = 0;
+  // Stub: no real receive yet.
   return false;
 }
+
+// -----------------------------------------------------------------------------
+// High-level API
+// -----------------------------------------------------------------------------
+
+bool KFDProtocol::beginKeyload(const KeyContainer& kc) {
+  if (!kc.isValid()) {
+    Serial.println("[KFD] beginKeyload(): container not valid (no keys)");
+    return false;
+  }
+
+  if (_state != IDLE) {
+    Serial.println("[KFD] beginKeyload(): already busy");
+    return false;
+  }
+
+  _activeContainer   = kc;     // copy UI-level container
+  _currentKeyIndex   = 0;
+  _state             = SESSION_START;
+
+  Serial.printf("[KFD] beginKeyload(): %u keys queued (label='%s')\n",
+                (unsigned)_activeContainer.keys.size(),
+                _activeContainer.label.c_str());
+  return true;
+}
+
+// Convert hex string to bytes (utility for the stub).
+static bool hexToBytes(const std::string& hex, uint8_t* out, size_t& outLen, size_t maxLen) {
+  outLen = 0;
+  size_t n = hex.size();
+  if (n == 0) return false;
+  if (n % 2 != 0) return false;
+
+  size_t bytes = n / 2;
+  if (bytes > maxLen) bytes = maxLen;
+
+  for (size_t i = 0; i < bytes; ++i) {
+    char hi = hex[2 * i];
+    char lo = hex[2 * i + 1];
+
+    auto cvt = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+      if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+      return -1;
+    };
+
+    int vhi = cvt(hi);
+    int vlo = cvt(lo);
+    if (vhi < 0 || vlo < 0) return false;
+
+    out[i] = (uint8_t)((vhi << 4) | vlo);
+  }
+
+  outLen = bytes;
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// State machine
+// -----------------------------------------------------------------------------
 
 void KFDProtocol::stateMachine() {
   switch (_state) {
     case IDLE:
-      return;
+      // Nothing to do
+      break;
 
     case SESSION_START: {
+      Serial.println("[KFD] SESSION_START");
+      // In real life: assert EN, send any session start frames, etc.
       twiSetEnable(true);
-      delayMicroseconds(50);
-      uint8_t frame[] = {0xAA, 0x55}; // demo sync
-      sendFrame(frame, sizeof(frame));
       _state = SENDING_KEYS;
       break;
     }
@@ -98,37 +156,52 @@ void KFDProtocol::stateMachine() {
         break;
       }
 
-      const auto& e = _activeContainer.keys[_currentKeyIndex];
-      uint8_t hdr[6];
-      hdr[0] = (e.keysetId >> 8) & 0xFF;
-      hdr[1] = (e.keysetId)&0xFF;
-      hdr[2] = (e.keyId >> 8) & 0xFF;
-      hdr[3] = (e.keyId)&0xFF;
-      hdr[4] = e.algorithmId;
-      hdr[5] = (uint8_t)e.keyData.size();
+      const KeySlot& e = _activeContainer.keys[_currentKeyIndex];
 
-      sendFrame(hdr, sizeof(hdr));
-      if (!e.keyData.empty()) {
-        sendFrame(e.keyData.data(), e.keyData.size());
+      // Skip keys that are not selected or have no hex data.
+      if (!e.selected || e.hex.empty()) {
+        Serial.printf("[KFD] Skipping key %u ('%s') – not selected/empty\n",
+                      (unsigned)_currentKeyIndex,
+                      e.label.c_str());
+        _currentKeyIndex++;
+        break;
       }
 
+      Serial.printf("[KFD] Sending key %u: label='%s', algo='%s'\n",
+                    (unsigned)_currentKeyIndex,
+                    e.label.c_str(),
+                    e.algo.c_str());
+
+      uint8_t keyBuf[64];
+      size_t  keyLen = 0;
+      if (!hexToBytes(e.hex, keyBuf, keyLen, sizeof(keyBuf))) {
+        Serial.println("[KFD] hexToBytes failed; marking ERROR");
+        _state = ERROR;
+        break;
+      }
+
+      // For now, just send raw key bytes as a frame.
+      sendFrame(keyBuf, keyLen);
+
+      // Advance to next key; we send one key per stateMachine() pass.
       _currentKeyIndex++;
-      // In a real implementation, wait for ACK/NAK frame here.
       break;
     }
 
     case SESSION_END: {
-      uint8_t frame[] = {0x55, 0xAA}; // demo end marker
-      sendFrame(frame, sizeof(frame));
-      delayMicroseconds(50);
+      Serial.println("[KFD] SESSION_END");
+      // In real life: send session-end frame, drop EN, etc.
       twiSetEnable(false);
-      _state = IDLE;
+      _state           = IDLE;
+      _currentKeyIndex = 0;
       break;
     }
 
     case ERROR: {
+      Serial.println("[KFD] ERROR state; aborting session");
       twiSetEnable(false);
-      _state = IDLE;
+      _state           = IDLE;
+      _currentKeyIndex = 0;
       break;
     }
   }
