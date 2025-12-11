@@ -98,10 +98,12 @@ static void show_containers_screen(lv_event_t* e);
 static void event_btn_keys(lv_event_t* e);
 static void event_btn_factory_reset(lv_event_t* e);
 static void event_factory_reset_confirm(lv_event_t* e);
+static void event_btn_save_now(lv_event_t* e);
 static void event_btn_keyload(lv_event_t* e);
 static void event_btn_settings(lv_event_t* e);
 static void event_btn_user_manager(lv_event_t* e);
 static void event_btn_keyload_start(lv_event_t* e);
+
 
 // user manager callbacks
 static void event_select_admin(lv_event_t* e);
@@ -583,6 +585,26 @@ static void event_set_active_container(lv_event_t* e) {
     }
     update_keyload_container_label();
 }
+
+
+// "Save containers now" button handler
+static void event_btn_save_now(lv_event_t* e) {
+    (void)e;
+
+    ContainerModel& model = ContainerModel::instance();
+    if (!model.saveNow()) {
+        if (status_label) {
+            lv_label_set_text(status_label, "SAVE FAILED (LittleFS)");
+        }
+        return;
+    }
+
+    if (status_label) {
+        lv_label_set_text(status_label, "CONTAINERS SAVED");
+    }
+}
+
+
 
 // Factory reset: show confirmation dialog
 static void event_btn_factory_reset(lv_event_t* e) {
@@ -1271,6 +1293,17 @@ static void build_settings_screen(void) {
     lv_checkbox_set_text(cb_audit, "Enable audit log to SD");
     lv_obj_set_style_text_color(cb_audit, lv_color_hex(0xC8F4FF), 0);
     lv_obj_align(cb_audit, LV_ALIGN_TOP_LEFT, 20, 140);
+
+      // "Save Now" button
+    lv_obj_t* btn_save = lv_btn_create(settings_screen);
+    lv_obj_set_size(btn_save, 260, 50);
+    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_MID, 0, -80);
+    style_moto_tile_button(btn_save);
+    lv_obj_add_event_cb(btn_save, event_btn_save_now, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* lbl_save = lv_label_create(btn_save);
+    lv_label_set_text(lbl_save, "SAVE CONTAINERS NOW");
+    lv_obj_center(lbl_save);
 
     // Factory reset button (admin-only)
     lv_obj_t* btn_factory = lv_btn_create(settings_screen);

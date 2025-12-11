@@ -20,17 +20,14 @@ struct KeyContainer {
     std::string algo;      // "AES256", "ADP", "DES-OFB"
     bool        locked;    // true = container locked and cannot be edited
 
-    // NOTE: ui.cpp and kfd_protocol.cpp expect this member to be named "keys".
+    // NOTE: ui.cpp expects this member to be named "keys".
     std::vector<KeySlot> keys;
 
     // Basic validity check used by higher-level code (e.g. keyload start).
     bool isValid() const {
-        // Must at least have one key with non-empty hex.
         if (keys.empty()) return false;
         for (const auto& k : keys) {
-            if (!k.hex.empty()) {
-                return true;
-            }
+            if (!k.hex.empty()) return true;
         }
         return false;
     }
@@ -41,46 +38,56 @@ public:
     static ContainerModel& instance();
 
     // ----- persistence -----
-    // Load from LittleFS; if file missing or invalid, build sane defaults
+
+    // Load from LittleFS; if file missing or invalid, build sane defaults.
     bool load();
 
-    // Save to LittleFS
+    // Called by mutating operations (add/update/delete). This is now
+    // NON-BLOCKING: it only marks state as "dirty" and records a timestamp.
     bool save();
 
-    // Erase filesystem and rebuild defaults (used by factory reset)
+    // Explicit, blocking save that really writes to LittleFS immediately.
+    // Used by the "Save Now" button and by factory reset.
+    bool saveNow();
+
+    // Erase LittleFS and rebuild defaults, then save them.
     bool factoryReset();
 
-    // Rebuild in-memory defaults (demo container/key)
+    // Rebuild in-memory defaults (demo container/key) without touching FS.
     void loadDefaults();
 
-    // ----- basic CRUD (used by ui.cpp) -----
-    size_t getCount() const;
+    // Periodic service: call from loop(). If there are pending changes
+    // and they've been idle for a bit, this writes them to LittleFS.
+    void service();
 
-    // Older-style API used by ui.cpp:
+    // ----- basic access -----
+
+    size_t              getCount() const;
     const KeyContainer& get(size_t idx) const;
     KeyContainer&       getMutable(size_t idx);
 
-    // Newer-style pointer API (also available if you want it)
     const KeyContainer* getContainer(size_t idx) const;
     KeyContainer*       getContainer(size_t idx);
 
-    int  getActiveIndex() const;
-    bool setActiveIndex(int idx);
-
-    // Convenience: pointer to active container (for keyload screens)
+    int                 getActiveIndex() const;
+    bool                setActiveIndex(int idx);
     const KeyContainer* getActive() const;
+
+    // ----- container CRUD -----
 
     bool addContainer(const KeyContainer& c);
     bool updateContainer(size_t idx, const KeyContainer& c);
     bool deleteContainer(size_t idx);
     bool moveContainer(size_t fromIdx, size_t toIdx);
 
-    // Legacy names used by ui.cpp:
+    // Legacy alias used by ui.cpp
     bool removeContainer(size_t idx) { return deleteContainer(idx); }
 
-    // Per-key operations used by ui.cpp:
+    // ----- key CRUD -----
+
     bool addKey(size_t containerIdx, const KeySlot& slot);
     bool updateKey(size_t containerIdx, size_t keyIdx, const KeySlot& slot);
+    bool removeKey(size_t containerIdx, size_t keyIdx);
 
 private:
     ContainerModel();
@@ -94,5 +101,8 @@ private:
     std::vector<KeyContainer> containers_;
     int                       active_index_;
 
-    bool storageReady_;
+    bool     storageReady_;
+    bool     dirty_;            // true if RAM state needs to be flushed
+    uint32_t last_change_ms_;   // last time save() was called
+    uint32_t last_save_ms_;     // last time we actually wrote to flash
 };

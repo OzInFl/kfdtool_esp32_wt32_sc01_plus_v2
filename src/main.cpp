@@ -224,6 +224,9 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
+  // Periodic container autosave (non-blocking most of the time)
+  ContainerModel::instance().service();
+
   // simple timing / debouncing
   static uint32_t last = millis();
   uint32_t now = millis();
@@ -238,3 +241,4 @@ void loop() {
     delay(5);
   }
 }
+

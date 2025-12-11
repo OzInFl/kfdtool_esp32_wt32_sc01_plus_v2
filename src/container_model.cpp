@@ -16,7 +16,10 @@ ContainerModel& ContainerModel::instance() {
 
 ContainerModel::ContainerModel()
     : active_index_(-1),
-      storageReady_(false)
+      storageReady_(false),
+      dirty_(false),
+      last_change_ms_(0),
+      last_save_ms_(0)
 {
     containers_.clear();
 }
@@ -56,6 +59,9 @@ void ContainerModel::loadDefaults() {
 
     Serial.printf("[ContainerModel] Defaults loaded (%u containers)\n",
                   (unsigned)containers_.size());
+
+    dirty_ = true;
+    last_change_ms_ = millis();
 }
 
 // -------------------------------------------------------
@@ -83,8 +89,6 @@ bool ContainerModel::ensureStorage() {
 //   G <algo>
 //   L <0/1 locked>
 //   K <slot_label>|<algo>|<hex>|<selected 0/1>
-//   K ...
-//   C <label>           (next container)
 //   ...
 //
 // We do not strictly rely on <container_count>; we parse until EOF.
@@ -215,6 +219,9 @@ bool ContainerModel::loadFromSPIFFS() {
 
     Serial.printf("[ContainerModel] Loaded %u containers from LittleFS (active=%d, declared=%d)\n",
                   (unsigned)containers_.size(), active_index_, declaredCount);
+
+    dirty_ = false;
+    last_save_ms_ = millis();
     return true;
 }
 
@@ -280,14 +287,30 @@ bool ContainerModel::load() {
     return true;
 }
 
+// Non-blocking: just mark "dirty" and remember when.
 bool ContainerModel::save() {
+    dirty_ = true;
+    last_change_ms_ = millis();
+    Serial.printf("[ContainerModel] save() -> mark dirty (count=%u)\n",
+                  (unsigned)containers_.size());
+    return true;
+}
+
+// Blocking: actually write to flash immediately.
+bool ContainerModel::saveNow() {
+    if (!ensureStorage()) {
+        Serial.println("[ContainerModel] saveNow(): storage not ready");
+        return false;
+    }
     if (!saveToSPIFFS()) {
-        Serial.printf("[ContainerModel] save() failed; RAM-only state (%u containers)\n",
+        Serial.printf("[ContainerModel] saveNow() failed; RAM-only state (%u containers)\n",
                       (unsigned)containers_.size());
         return false;
     }
 
-    Serial.printf("[ContainerModel] save() OK (%u containers)\n",
+    dirty_ = false;
+    last_save_ms_ = millis();
+    Serial.printf("[ContainerModel] saveNow() OK (%u containers)\n",
                   (unsigned)containers_.size());
     return true;
 }
@@ -320,8 +343,26 @@ bool ContainerModel::factoryReset() {
         return false;
     }
 
+    dirty_ = false;
+    last_save_ms_ = millis();
+
     Serial.println("[ContainerModel] FACTORY RESET complete (defaults written)");
     return true;
+}
+
+// Periodic background flush (call from loop()).
+void ContainerModel::service() {
+    if (!dirty_) return;
+
+    uint32_t now = millis();
+    const uint32_t MIN_SETTLE_MS   = 1000; // wait for edits to settle
+    const uint32_t MIN_INTERVAL_MS = 2000; // don't hammer flash
+
+    if (now - last_change_ms_ < MIN_SETTLE_MS) return;
+    if (now - last_save_ms_   < MIN_INTERVAL_MS) return;
+
+    // Try to flush; if it fails, we'll stay dirty_ = true and try again later.
+    (void)saveNow();
 }
 
 // ----- CRUD -----
@@ -332,7 +373,6 @@ size_t ContainerModel::getCount() const {
 
 // Old-style API used by ui.cpp
 const KeyContainer& ContainerModel::get(size_t idx) const {
-    // Caller already bounds-checks in ui.cpp; but clamp for safety.
     if (idx >= containers_.size()) {
         static KeyContainer dummy;
         return dummy;
@@ -348,7 +388,7 @@ KeyContainer& ContainerModel::getMutable(size_t idx) {
     return containers_[idx];
 }
 
-// Pointer-style API
+// Pointer-style API (not heavily used yet)
 const KeyContainer* ContainerModel::getContainer(size_t idx) const {
     if (idx >= containers_.size()) return nullptr;
     return &containers_[idx];
@@ -370,6 +410,7 @@ bool ContainerModel::setActiveIndex(int idx) {
         return false;
     }
     active_index_ = idx;
+    save();  // non-blocking
     return true;
 }
 
@@ -439,5 +480,13 @@ bool ContainerModel::updateKey(size_t containerIdx, size_t keyIdx, const KeySlot
     auto& kc = containers_[containerIdx];
     if (keyIdx >= kc.keys.size()) return false;
     kc.keys[keyIdx] = slot;
+    return save();
+}
+
+bool ContainerModel::removeKey(size_t containerIdx, size_t keyIdx) {
+    if (containerIdx >= containers_.size()) return false;
+    auto& kc = containers_[containerIdx];
+    if (keyIdx >= kc.keys.size()) return false;
+    kc.keys.erase(kc.keys.begin() + keyIdx);
     return save();
 }
