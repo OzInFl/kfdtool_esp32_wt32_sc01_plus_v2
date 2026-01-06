@@ -38,28 +38,14 @@ public:
     static ContainerModel& instance();
 
     // ----- persistence -----
-
-    // Load from LittleFS; if file missing or invalid, build sane defaults.
-    bool load();
-
-    // Non-blocking: mark state as dirty & remember change time.
-    bool save();
-
-    // Blocking: immediately write to LittleFS.
-    bool saveNow();
-
-    // Erase LittleFS and rebuild defaults, then save them.
+    bool load();      // Load from LittleFS; if file missing or invalid, build sane defaults.
+    bool save();      // Non-blocking: mark state as dirty & remember change time.
+    bool saveNow();   // Blocking: immediately write to LittleFS.
     bool factoryReset();
-
-    // Rebuild in-memory defaults (demo container/key) without touching FS.
     void loadDefaults();
-
-    // Periodic service: call from loop(). If there are pending changes
-    // and they've been idle for a bit, this writes them to LittleFS.
-    void service();
+    void service();   // periodic deferred autosave
 
     // ----- basic access -----
-
     size_t              getCount() const;
     const KeyContainer& get(size_t idx) const;
     KeyContainer&       getMutable(size_t idx);
@@ -73,7 +59,9 @@ public:
 
     // ----- container CRUD -----
 
-    bool addContainer(const KeyContainer& c);
+    // IMPORTANT: returns the new index on success, or -1 on failure.
+    int  addContainer(const KeyContainer& c);
+
     bool updateContainer(size_t idx, const KeyContainer& c);
     bool deleteContainer(size_t idx);
     bool moveContainer(size_t fromIdx, size_t toIdx);
@@ -82,7 +70,6 @@ public:
     bool removeContainer(size_t idx) { return deleteContainer(idx); }
 
     // ----- key CRUD -----
-
     bool addKey(size_t containerIdx, const KeySlot& slot);
     bool updateKey(size_t containerIdx, size_t keyIdx, const KeySlot& slot);
     bool removeKey(size_t containerIdx, size_t keyIdx);
@@ -100,7 +87,7 @@ private:
     int                       active_index_;
 
     bool     storageReady_;
-    bool     dirty_;            // true if RAM state needs to be flushed
-    uint32_t last_change_ms_;   // last time save() was called
-    uint32_t last_save_ms_;     // last time we actually wrote to flash
+    bool     dirty_;
+    uint32_t last_change_ms_;
+    uint32_t last_save_ms_;
 };

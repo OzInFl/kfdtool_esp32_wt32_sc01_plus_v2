@@ -89,7 +89,6 @@ bool ContainerModel::ensureStorage() {
 //   G <algo>
 //   L <0/1 locked>
 //   K <slot_label>|<algo>|<hex>|<selected 0/1>
-//   ...
 //
 // We do not strictly rely on <container_count>; we parse until EOF.
 //
@@ -103,7 +102,6 @@ bool ContainerModel::loadFromSPIFFS() {
     if (!LittleFS.exists(KFD_CONTAINER_FILE)) {
         Serial.println("[ContainerModel] no containers file; using defaults");
         loadDefaults();
-        // Persist defaults so next boot sees a file
         saveToSPIFFS();
         return true;
     }
@@ -159,7 +157,6 @@ bool ContainerModel::loadFromSPIFFS() {
             inContainer = true;
             current.label = l.substring(2).c_str();
         } else if (!inContainer) {
-            // Ignore other lines until first 'C'
             continue;
         } else if (type == 'A') {
             current.agency = l.substring(2).c_str();
@@ -242,10 +239,8 @@ bool ContainerModel::saveToSPIFFS() {
         activeIdx = (containers_.empty() ? -1 : 0);
     }
 
-    // Header
     f.printf("KFDv1 %d %u\n", activeIdx, (unsigned)containers_.size());
 
-    // Containers
     for (const auto& c : containers_) {
         f.printf("C %s\n", c.label.c_str());
         f.printf("A %s\n", c.agency.c_str());
@@ -280,14 +275,12 @@ bool ContainerModel::load() {
     }
 
     if (!loadFromSPIFFS()) {
-        // loadFromSPIFFS already falls back to defaults
         return false;
     }
 
     return true;
 }
 
-// Non-blocking: just mark "dirty" and remember when.
 bool ContainerModel::save() {
     dirty_ = true;
     last_change_ms_ = millis();
@@ -296,7 +289,6 @@ bool ContainerModel::save() {
     return true;
 }
 
-// Blocking: actually write to flash immediately.
 bool ContainerModel::saveNow() {
     if (!ensureStorage()) {
         Serial.println("[ContainerModel] saveNow(): storage not ready");
@@ -323,20 +315,17 @@ bool ContainerModel::factoryReset() {
         return false;
     }
 
-    // Erase the whole LittleFS filesystem
     if (!LittleFS.format()) {
         Serial.println("[ContainerModel] factoryReset(): LittleFS.format() failed");
         return false;
     }
 
-    // Force re-mount after format
     storageReady_ = false;
     if (!ensureStorage()) {
         Serial.println("[ContainerModel] factoryReset(): remount after format failed");
         return false;
     }
 
-    // Rebuild defaults and persist them
     loadDefaults();
     if (!saveToSPIFFS()) {
         Serial.println("[ContainerModel] factoryReset(): save defaults failed");
@@ -350,18 +339,16 @@ bool ContainerModel::factoryReset() {
     return true;
 }
 
-// Periodic background flush (call from loop()).
 void ContainerModel::service() {
     if (!dirty_) return;
 
     uint32_t now = millis();
-    const uint32_t MIN_SETTLE_MS   = 1000; // wait for edits to settle
-    const uint32_t MIN_INTERVAL_MS = 3000; // don't hammer flash
+    const uint32_t MIN_SETTLE_MS   = 1000;
+    const uint32_t MIN_INTERVAL_MS = 3000;
 
     if (now - last_change_ms_ < MIN_SETTLE_MS) return;
     if (now - last_save_ms_   < MIN_INTERVAL_MS) return;
 
-    // Try to flush; if it fails, we'll stay dirty_ = true and try again later.
     (void)saveNow();
 }
 
@@ -371,7 +358,6 @@ size_t ContainerModel::getCount() const {
     return containers_.size();
 }
 
-// Old-style API used by ui.cpp
 const KeyContainer& ContainerModel::get(size_t idx) const {
     if (idx >= containers_.size()) {
         static KeyContainer dummy;
@@ -388,7 +374,6 @@ KeyContainer& ContainerModel::getMutable(size_t idx) {
     return containers_[idx];
 }
 
-// Pointer-style API (not heavily used yet)
 const KeyContainer* ContainerModel::getContainer(size_t idx) const {
     if (idx >= containers_.size()) return nullptr;
     return &containers_[idx];
@@ -399,8 +384,6 @@ KeyContainer* ContainerModel::getContainer(size_t idx) {
     return &containers_[idx];
 }
 
-// Active selection
-
 int ContainerModel::getActiveIndex() const {
     return active_index_;
 }
@@ -410,7 +393,7 @@ bool ContainerModel::setActiveIndex(int idx) {
         return false;
     }
     active_index_ = idx;
-    save();  // non-blocking
+    save();
     return true;
 }
 
@@ -421,12 +404,13 @@ const KeyContainer* ContainerModel::getActive() const {
     return &containers_[active_index_];
 }
 
-bool ContainerModel::addContainer(const KeyContainer& c) {
+int ContainerModel::addContainer(const KeyContainer& c) {
     containers_.push_back(c);
     if (active_index_ < 0) {
         active_index_ = 0;
     }
-    return save();
+    save();
+    return (int)containers_.size() - 1;
 }
 
 bool ContainerModel::updateContainer(size_t idx, const KeyContainer& c) {
@@ -466,8 +450,6 @@ bool ContainerModel::moveContainer(size_t fromIdx, size_t toIdx) {
 
     return save();
 }
-
-// Per-key operations used by ui.cpp
 
 bool ContainerModel::addKey(size_t containerIdx, const KeySlot& slot) {
     if (containerIdx >= containers_.size()) return false;
